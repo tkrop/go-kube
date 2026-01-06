@@ -1,0 +1,126 @@
+## Maintained by: github.com/tkrop/go-make
+
+# Translates the 'golangci-lint' settings into an Codacy understandable format.
+
+# When set to false, ignores files with "GENERATED" header.
+ignoreGeneratedHeader = true
+
+# Sets the default severity to "warning"
+severity = "error"
+
+# Sets the default failure confidence. This means that linting errors
+# with less than 0.8 confidence will be ignored.
+confidence = 0.8
+
+# Sets the error code for failures with severity "error"
+errorCode = 1
+
+# Sets the error code for failures with severity "warning"
+warningCode = 0
+
+# Enables all available rules
+enableAllRules = true
+
+# Reports on missing or wrong file headers.
+# No need to enforce a file header.
+[rule.file-header]
+  disabled = true
+
+# Reports on each file in a package having no package comments.
+# Rule prevents from having a central package documentation in `doc.go`.
+[rule.package-comments]
+  disabled = true
+
+# Reports on mismatches between directory names and package names.
+# Rule prevents having a clearer hyphen readable directory name.
+[rule.package-directory-mismatch]
+  disabled = true
+
+# Reports on exported comments not matching the name as first word.
+# Rule prevents being more relaxed in comment writing.
+[rule.exported]
+  disabled = true
+
+# No need to exclude import shadowing.
+[rule.import-shadowing]
+  disabled = true
+
+# Excluding '.'-import makes test package separation unnecessary difficult.
+[rule.dot-imports]
+  disabled = true
+
+# Excluding unchecked type assertion since ending in panic is usually okay.
+[rule.unchecked-type-assertion]
+  disabled = true
+
+# Fails to disable writers that actually cannot return errors.
+[rule.unhandled-error]
+  disabled = true
+
+# Conflicts with strategy to embed assignments in if statements.
+[rule.indent-error-flow]
+  disabled = true
+
+# Fails to restrict sufficiently in switches with numeric values.
+[rule.add-constant]
+  disabled = true
+
+# Rule prevents intentional usage of similar variable names.
+[rule.flag-parameter]
+  disabled = true
+
+# Rule prevents intentional usage of similar private method names.
+[rule.confusing-naming]
+  disabled = true
+
+# Rule prevents intentional usage of explicit exhaustive switches.
+[rule.useless-fallthrough]
+  disabled = true
+
+# Rule prevents intentional usage of explicit exhaustive switches.
+[rule.enforce-switch-style]
+  disabled = true
+
+# Rule prevents intentional usage of explicit branches.
+[rule.identical-switch-branches]
+  disabled = true
+
+# Rule prevents intentional usage of explicit branches.
+[rule.identical-ifelseif-branches]
+  disabled = true
+
+
+# Enables a more experienced cyclomatic complexity (we enabled a log of rules
+# to counter-act the complexity trap).
+[rule.cyclomatic]
+  arguments = [20]
+
+# Enables a more experienced cognitive complexity (we enabled a lot of rules
+# to counter-act the complexity trap).
+[rule.cognitive-complexity]
+  arguments = [20]
+
+# Limit line-length to increase readability (compromise between 80 and 120 is
+# at 100).
+[rule.line-length-limit]
+  arguments = [100]
+
+# We are a bit more relaxed with function length consistent with funlen.
+[rule.function-length]
+  arguments = [40,60]
+
+# Limit arguments of functions to the maximum understandable value.
+[rule.argument-limit]
+  arguments = [6]
+
+# Limit results of functions to the maximum understandable value.
+[rule.function-result-limit]
+  arguments = [4]
+
+# Raise the limit a bit to allow more complex package models.
+[rule.max-public-structs]
+  arguments = [8]
+
+# I do not know what I'm doing here...
+[rule.banned-characters]
+  arguments = ["Ω", "Σ", "σ"]
