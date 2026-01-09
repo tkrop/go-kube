@@ -1,0 +1,12 @@
+## Maintained by: github.com/tkrop/go-make
+
+engines:
+  duplication:
+    minTokenMatch: 50
+    exclude_paths:
+      - "**/*_test.go"
+  revive:
+    exclude_paths:
+      - "**/zz_generated.*.go"
+      - "**/mock_*_test.go"
+      - "**/mock_*.go"

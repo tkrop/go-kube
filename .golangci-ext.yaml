@@ -1,0 +1,6 @@
+version: "2"
+linters:
+  settings:
+    wrapcheck:
+      extra-ignore-sigs:
+        - errors.Error
