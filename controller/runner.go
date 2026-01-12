@@ -82,8 +82,8 @@ func NewLeaderRunner(
 
 	return &LeaderRunner{
 		config:    config,
-		key:       key,
 		namespace: namespace,
+		key:       key,
 		k8scli:    k8scli,
 	}
 }

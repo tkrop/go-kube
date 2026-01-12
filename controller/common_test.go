@@ -19,7 +19,7 @@ import (
 // Config creates a basic controller Config for testing.
 func Config(name string) *controller.Config {
 	return &controller.Config{
-		Name: name, Workers: 1, Resync: time.Minute,
+		Name: name, Workers: 1, Sync: time.Minute,
 	}
 }
 

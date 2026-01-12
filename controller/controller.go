@@ -18,14 +18,14 @@ var ErrController = errors.NewError("controller")
 
 // Config is the controller configuration.
 type Config struct {
-	// Name of main the controller resource.
+	// Name of the main controller resource.
 	Name string
 	// Workers is the number of concurrent workers the controller will run
 	// processing events.
 	Workers int
-	// Resync is the interval in which the controller will process re-capture
-	// the selected resources from the API server.
-	Resync time.Duration
+	// Sync is the interval in which the controller will process a re-capture
+	// of the selected resources from the API server.
+	Sync time.Duration
 	// Retries is the number of times the controller will try to process an
 	// resource event before returning a real error.
 	Retries int
@@ -89,7 +89,7 @@ func New[T runtime.Object](
 	informer := cache.NewSharedIndexInformer(&cache.ListWatch{
 		ListWithContextFunc:  retriever.List,
 		WatchFuncWithContext: retriever.Watch,
-	}, temp, config.Resync, indexers)
+	}, temp, config.Sync, indexers)
 
 	return &controller[T]{
 		config:    config,
@@ -120,7 +120,7 @@ func (c *controller[T]) addHandler(handler *ResourceEventHandler[T]) error {
 	c.handler = append(c.handler, handler)
 
 	if _, err := c.informer.AddEventHandlerWithResyncPeriod(
-		handler, c.config.Resync); err != nil {
+		handler, c.config.Sync); err != nil {
 		return ErrController.New("event handler [name=%s] %w",
 			c.config.Name, err)
 	}

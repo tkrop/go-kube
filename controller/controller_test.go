@@ -116,7 +116,7 @@ var controllerNewTestCases = map[string]controllerNewParams{
 	},
 	"multiple-workers": {
 		config: &controller.Config{
-			Name: "multi-worker", Workers: 3, Resync: time.Minute,
+			Name: "multi-worker", Workers: 3, Sync: time.Minute,
 		},
 		indexers: cache.Indexers{},
 	},
@@ -247,7 +247,7 @@ var controllerRunTestCases = map[string]controllerRunParams{
 	},
 	"with-processor": {
 		config: &controller.Config{
-			Name: "run", Workers: 0, Resync: time.Minute,
+			Name: "run", Workers: 0, Sync: time.Minute,
 		},
 		setup: mock.Chain(
 			CallRetrieverWatchEndless(),
