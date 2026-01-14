@@ -2,11 +2,9 @@ package controller
 
 import (
 	"context"
-	"os"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/leaderelection"
@@ -27,6 +25,10 @@ const (
 // LeaderConfig is the configuration for the leader election, i.e. lease
 // duration, renew deadline, and retry period.
 type LeaderConfig struct {
+	// Name is the basic name of the resource lock.
+	Name string `default:"controller"`
+	// Namespace is the namespace of the resource lock.
+	Namespace string `default:"default"`
 	// LeaseDuration is the duration that non-leader candidates will
 	// wait to force acquire leadership. This is measured against time of
 	// last observed ack.
@@ -41,7 +43,8 @@ type LeaderConfig struct {
 
 // Runner knows how to run the processing queue.
 type Runner interface {
-	// Run runs the given function with a context.
+	// Run runs the given function with a context as soon as the instance of
+	// the runner with the given host identifier takes the lead.
 	Run(call func(ctx context.Context) error) error
 }
 
@@ -53,23 +56,29 @@ func NewDefaultRunner() Runner {
 	return &DefaultRunner{}
 }
 
-// Run will just run the provided function.
-func (*DefaultRunner) Run(call func(ctx context.Context) error) error {
+// Run runs the given function with a context as soon as the instance of the
+// runner with the given host identifier takes the lead.
+func (*DefaultRunner) Run(
+	call func(ctx context.Context) error,
+) error {
 	return call(context.Background())
 }
 
 // LeaderRunner is the leader election default implementation.
 type LeaderRunner struct {
-	key       string
-	namespace string
-	k8scli    kubernetes.Interface
-	config    *LeaderConfig
+	hostid string
+	k8scli kubernetes.Interface
+	config *LeaderConfig
 }
 
-// NewLeaderRunner returns a new leader election runner that can be used to
-// run a function after acquiring leadership.
+// NewLeaderRunner returns a new leader election runner with given unique host
+// identifier that can be used to run a function after acquiring leadership
+// using the Kubernetes leader election mechanism. Make sure to use a unique
+// host identifier for each instance of a leader eleaction runner, e.g. by
+// adding a universal unique identifier to the hostname.
 func NewLeaderRunner(
-	namespace, key string, config *LeaderConfig,
+	hostid string,
+	config *LeaderConfig,
 	k8scli kubernetes.Interface,
 ) Runner {
 	if config == nil {
@@ -81,15 +90,17 @@ func NewLeaderRunner(
 	}
 
 	return &LeaderRunner{
-		config:    config,
-		namespace: namespace,
-		key:       key,
-		k8scli:    k8scli,
+		hostid: hostid,
+		config: config,
+		k8scli: k8scli,
 	}
 }
 
-// Run will run as soon as the runner instance takes the lead.
-func (r *LeaderRunner) Run(call func(ctx context.Context) error) error {
+// Run will run the given function with a context as soon as the runner
+// instances identified by the given hostid takes the lead.
+func (r *LeaderRunner) Run(
+	call func(ctx context.Context) error,
+) error {
 	lock, err := r.InitResourceLock()
 	if err != nil {
 		return err
@@ -135,26 +146,20 @@ func (r *LeaderRunner) Run(call func(ctx context.Context) error) error {
 	return <-errch
 }
 
-// InitResourceLock will initialize the resource lock for leader election.
+// InitResourceLock will initialize the resource lock for leader election using
+// the given unique host identifier.
 func (r *LeaderRunner) InitResourceLock() (resourcelock.Interface, error) {
-	hostname, err := os.Hostname()
-	if err != nil {
-		return nil, ErrController.New("getting hostname: %w", err)
-	}
-	id := hostname + "_" + string(uuid.NewUUID())
-
 	recorder := record.NewBroadcaster().
 		NewRecorder(scheme.Scheme, corev1.EventSource{
-			Component: r.key, Host: id,
+			Component: r.config.Name, Host: r.hostid,
 		})
 
 	lock, err := resourcelock.New(
 		resourcelock.LeasesResourceLock,
-		r.namespace, r.key,
-		r.k8scli.CoreV1(),
-		r.k8scli.CoordinationV1(),
+		r.config.Namespace, r.config.Name,
+		r.k8scli.CoreV1(), r.k8scli.CoordinationV1(),
 		resourcelock.ResourceLockConfig{
-			Identity:      id,
+			Identity:      r.hostid,
 			EventRecorder: recorder,
 		},
 	)

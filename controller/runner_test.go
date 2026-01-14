@@ -14,59 +14,63 @@ import (
 	"github.com/tkrop/go-kube/controller"
 )
 
-// TODO: this is an AI generated test that needs to be reviewed and improved.
+// This is an AI generated test that needs to be improved.
+//
+// First analysis was conducted on 2026-01-14. Only pain point is the missing
+// mock for setup for the leader election lease creation and update testing
+// the integration. Mocking those calls in complex due to the detached routine
+// used to loop for the lease renewals in combination with the random lease
+// and renewal timings added by the leader election logic.
+//
+// For better testing we need three main improvements:
+// 1. Find a way to control the detached routine used for the lease renewals,
+// 2. Find a way to control the lease and renewal timings, and
+// 3. Add improvements to the mock framework to be able to add optional mock
+//    calls in a sequence of calls.
 
-func CallK8sClientCoreV1() mock.SetupFunc {
+// CallSuccess returns a successful call function.
+func CallSuccess(_ context.Context) error {
+	return nil
+}
+
+// CallError returns an error call function.
+func CallError(_ context.Context) error {
+	return assert.AnError
+}
+
+// CallSlow returns a slow call function.
+func CallSlow(_ context.Context) error {
+	time.Sleep(50 * time.Millisecond)
+
+	return nil
+}
+
+// CallK8sClientCoreV1 sets up the mock for the core methods.
+func CallK8sClientCoreV1(core bool) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
-		corev1 := fake.NewClientset().CoreV1()
+		if !core {
+			return mock.Get(mocks, NewMockK8sClient).EXPECT().CoreV1().
+				Return(nil)
+		}
 
-		return mock.Get(mocks, NewMockK8sClient).EXPECT().
-			CoreV1().Return(corev1).AnyTimes()
+		return mock.Get(mocks, NewMockK8sClient).EXPECT().CoreV1().
+			Return(mock.Get(mocks, NewMockCoreV1Interface))
 	}
 }
 
+// CallK8sClientCoordinationV1 sets up the mock for the coordination methods.
 func CallK8sClientCoordinationV1() mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		coordv1 := fake.NewClientset().CoordinationV1()
 
 		return mock.Get(mocks, NewMockK8sClient).EXPECT().
-			CoordinationV1().Return(coordv1).AnyTimes()
+			CoordinationV1().Return(coordv1)
 	}
-}
-
-func CallSetupK8sClient() mock.SetupFunc {
-	return mock.Chain(
-		CallK8sClientCoreV1(),
-		CallK8sClientCoordinationV1())
-}
-
-func CallK8sClientCoreV1Nil() mock.SetupFunc {
-	return func(mocks *mock.Mocks) any {
-		return mock.Get(mocks, NewMockK8sClient).EXPECT().
-			CoreV1().Return(nil).AnyTimes()
-	}
-}
-
-func CallK8sClientCoordinationV1Nil() mock.SetupFunc {
-	return func(mocks *mock.Mocks) any {
-		return mock.Get(mocks, NewMockK8sClient).EXPECT().
-			CoordinationV1().Return(nil).AnyTimes()
-	}
-}
-
-func CallSetupK8sClientCoreV1Nil() mock.SetupFunc {
-	return mock.Chain(
-		CallK8sClientCoreV1Nil(),
-		CallK8sClientCoordinationV1())
-}
-
-func CallSetupK8sClientCoordinationV1Nil() mock.SetupFunc {
-	return mock.Chain(
-		CallK8sClientCoreV1(),
-		CallK8sClientCoordinationV1Nil())
 }
 
 var defaultLeaderConfig = &controller.LeaderConfig{
+	Name:          "controller",
+	Namespace:     "default",
 	LeaseDuration: 100 * time.Millisecond,
 	RenewDeadline: 80 * time.Millisecond,
 	RetryPeriod:   20 * time.Millisecond,
@@ -81,8 +85,6 @@ var newDefaultRunnerTestCases = map[string]newDefaultRunnerParams{
 func TestNewDefaultRunner(t *testing.T) {
 	test.Map(t, newDefaultRunnerTestCases).
 		Run(func(t test.Test, _ newDefaultRunnerParams) {
-			// Given
-
 			// When
 			runner := controller.NewDefaultRunner()
 
@@ -98,16 +100,12 @@ type defaultRunnerRunParams struct {
 
 var defaultRunnerRunTestCases = map[string]defaultRunnerRunParams{
 	"successful-run": {
-		call: func(_ context.Context) error {
-			return nil
-		},
+		call:   CallSuccess,
 		expect: nil,
 	},
 
 	"run-with-error": {
-		call: func(_ context.Context) error {
-			return assert.AnError
-		},
+		call:   CallError,
 		expect: assert.AnError,
 	},
 }
@@ -127,22 +125,18 @@ func TestDefaultRunnerRun(t *testing.T) {
 }
 
 type newLeaderRunnerParams struct {
-	key       string
-	namespace string
-	config    *controller.LeaderConfig
+	config *controller.LeaderConfig
 }
 
 var newLeaderRunnerTestCases = map[string]newLeaderRunnerParams{
 	"with-nil-config": {
-		key:       "test-controller",
-		namespace: "default",
-		config:    nil,
+		config: nil,
 	},
 
 	"with-custom-config": {
-		key:       "custom-controller",
-		namespace: "kube-system",
 		config: &controller.LeaderConfig{
+			Name:          "custom-controller",
+			Namespace:     "kube-system",
 			LeaseDuration: 20 * time.Second,
 			RenewDeadline: 15 * time.Second,
 			RetryPeriod:   5 * time.Second,
@@ -154,11 +148,12 @@ func TestNewLeaderRunner(t *testing.T) {
 	test.Map(t, newLeaderRunnerTestCases).
 		Run(func(t test.Test, param newLeaderRunnerParams) {
 			// Given
-			k8scli := fake.NewClientset()
+			mocks := mock.NewMocks(t)
+			k8scli := mock.Get(mocks, NewMockK8sClient)
 
 			// When
 			runner := controller.NewLeaderRunner(
-				param.namespace, param.key, param.config, k8scli)
+				t.Name(), param.config, k8scli)
 
 			// Then
 			assert.NotNil(t, runner)
@@ -167,6 +162,7 @@ func TestNewLeaderRunner(t *testing.T) {
 
 type leaderRunnerRunParams struct {
 	setup  mock.SetupFunc
+	hostid string
 	config *controller.LeaderConfig
 	call   func(ctx context.Context) error
 	expect error
@@ -174,76 +170,103 @@ type leaderRunnerRunParams struct {
 
 var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 	"success": {
-		setup:  CallSetupK8sClient(),
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		hostid: "host-1",
 		config: defaultLeaderConfig,
-		call: func(_ context.Context) error {
-			return nil
-		},
+		call:   CallSuccess,
 	},
 
 	"success-with-nil-config": {
-		setup: CallSetupK8sClient(),
-		call: func(_ context.Context) error {
-			return nil
-		},
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		hostid: "host-1",
+		call:   CallSuccess,
+	},
+
+	"error-hostid": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		hostid: "",
+		config: defaultLeaderConfig,
+		call:   CallSuccess,
+		expect: controller.ErrController.New("creating elector: %w",
+			//lint:ignore ST1005 // matching Kubernetes error message.
+			//nolint:staticcheck // matching Kubernetes error message.
+			errors.New("Lock identity is empty"),
+		),
 	},
 
 	"call-error": {
-		setup:  CallSetupK8sClient(),
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		hostid: "host-1",
 		config: defaultLeaderConfig,
-		call: func(_ context.Context) error {
-			return errors.New("processing error")
-		},
-		expect: errors.New("processing error"),
+		call:   CallError,
+		expect: assert.AnError,
 	},
 
 	"call-slow": {
-		setup:  CallSetupK8sClient(),
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		hostid: "host-1",
 		config: defaultLeaderConfig,
-		call: func(_ context.Context) error {
-			time.Sleep(50 * time.Millisecond)
-
-			return nil
-		},
+		call:   CallSlow,
 	},
 
 	"invalid-elector-config": {
-		setup: CallSetupK8sClient(),
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		hostid: "host-1",
 		config: &controller.LeaderConfig{
+			Name:          "invalid-controller",
+			Namespace:     "default",
 			LeaseDuration: 10 * time.Millisecond,
 			RenewDeadline: 80 * time.Millisecond,
 			RetryPeriod:   20 * time.Millisecond,
 		},
-		call: func(_ context.Context) error {
-			return nil
-		},
+		call: CallSuccess,
 		expect: controller.ErrController.
 			New("creating elector: %w", errors.New(
 				"leaseDuration must be greater than renewDeadline")),
 	},
 
 	"minimal-valid-timings": {
-		setup: CallSetupK8sClient(),
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1()),
+		hostid: "host-1",
 		config: &controller.LeaderConfig{
 			LeaseDuration: 15 * time.Millisecond,
 			RenewDeadline: 10 * time.Millisecond,
 			RetryPeriod:   2 * time.Millisecond,
 		},
-		call: func(_ context.Context) error {
-			return nil
-		},
+		call: CallSuccess,
 	},
 }
 
 func TestLeaderRunnerRun(t *testing.T) {
 	test.Map(t, leaderRunnerRunTestCases).
+		// Filter(test.Pattern[leaderRunnerRunParams]("call-slow")).
 		Run(func(t test.Test, param leaderRunnerRunParams) {
 			// Given
 			mocks := mock.NewMocks(t).Expect(param.setup)
 			k8scli := mock.Get(mocks, NewMockK8sClient)
 
 			runner := controller.NewLeaderRunner(
-				"default", "run", param.config, k8scli)
+				param.hostid, param.config, k8scli)
 
 			// When
 			err := runner.Run(param.call)

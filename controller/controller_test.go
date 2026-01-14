@@ -157,7 +157,7 @@ var controllerAddHandlerTestCases = map[string]controllerAddHandlerParams{
 		before: func(ctrl controller.Controller[*corev1.Pod]) {
 			ctx, cancel := context.WithCancel(context.Background())
 			sigerr := make(chan error, 1)
-			go ctrl.Run(ctx, sigerr, nil)
+			go ctrl.Run(ctx, nil, sigerr)
 			time.Sleep(200 * time.Millisecond)
 			cancel()
 			<-sigerr
@@ -295,7 +295,7 @@ func TestControllerRun(t *testing.T) {
 			defer cancel()
 
 			// When
-			go ctrl.Run(ctx, sigerr, param.runner)
+			go ctrl.Run(ctx, param.runner, sigerr)
 
 			// Then
 			timeout := 200 * time.Millisecond

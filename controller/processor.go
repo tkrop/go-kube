@@ -119,9 +119,7 @@ func (p *Processor[T]) Process() {
 			p.handler.Notify(ctx, key,
 				ErrController.New("type assertion: %T", obj))
 		} else if err = p.handler.Handle(ctx, o); err != nil {
-			if p.queue == nil {
-				p.handler.Notify(ctx, key, err)
-			} else if rerr := p.queue.Requeue(ctx, key); rerr != nil {
+			if rerr := p.queue.Requeue(ctx, key); rerr != nil {
 				p.handler.Notify(ctx, key,
 					ErrController.New("could not retry: %s: %w", rerr, err))
 			}
