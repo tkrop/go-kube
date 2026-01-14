@@ -210,6 +210,13 @@ var monitorQueueTestCases = map[string]monitorQueueParams{
 			{op: "shutdown"},
 		},
 	},
+
+	"shutdown-get": {
+		ops: []queueOp{
+			{op: "shutdown"},
+			{op: "get", item: ""},
+		},
+	},
 }
 
 func TestMonitorQueue(t *testing.T) {
@@ -236,8 +243,10 @@ func TestMonitorQueue(t *testing.T) {
 					recorder.EXPECT().AddEvent(
 						gomock.Any(), "test-queue", true).Times(1)
 				case "get":
-					recorder.EXPECT().GetEvent(
-						gomock.Any(), "test-queue", gomock.Any()).Times(1)
+					if op.item != "" {
+						recorder.EXPECT().GetEvent(
+							gomock.Any(), "test-queue", gomock.Any()).Times(1)
+					}
 				}
 			}
 

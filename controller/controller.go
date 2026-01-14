@@ -65,7 +65,7 @@ type Controller[T runtime.Object] interface {
 	// AddHandler will add a new handler to the controller.
 	AddHandler(handler Handler[T], recorder Recorder) error
 	// Run starts the controller loop.
-	Run(ctx context.Context, sigerr chan error, runner Runner)
+	Run(ctx context.Context, runner Runner, sigerr chan error)
 }
 
 // controller is the implementation of the cache interface.
@@ -130,7 +130,7 @@ func (c *controller[T]) addHandler(handler *ResourceEventHandler[T]) error {
 
 // Run starts the controller loop.
 func (c *controller[T]) Run(
-	ctx context.Context, sigerr chan error, runner Runner,
+	ctx context.Context, runner Runner, sigerr chan error,
 ) {
 	sigerr <- ErrController.Wrap("running [name=%s]: %w",
 		c.config.Name, c.run(ctx, runner))
