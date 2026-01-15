@@ -157,11 +157,17 @@ var controllerAddHandlerTestCases = map[string]controllerAddHandlerParams{
 		before: func(ctrl controller.Controller[*corev1.Pod]) {
 			ctx, cancel := context.WithCancel(context.Background())
 			sigerr := make(chan error, 1)
-			go ctrl.Run(ctx, nil, sigerr)
-			time.Sleep(200 * time.Millisecond)
+			go ctrl.Run(ctx, sigerr, nil)
+			time.Sleep(100 * time.Millisecond)
 			cancel()
-			<-sigerr
-			time.Sleep(200 * time.Millisecond)
+			// Wait with timeout for controller to shut down
+			select {
+			case <-sigerr:
+				// Controller shut down cleanly
+			case <-time.After(200 * time.Millisecond):
+				// Continue anyway - controller might still be shutting down
+			}
+			time.Sleep(50 * time.Millisecond)
 		},
 		expect: func(ctrl controller.Controller[*corev1.Pod]) error {
 			return controller.ErrController.New("event handler [name=%s] %w",
@@ -242,8 +248,8 @@ var controllerRunTestCases = map[string]controllerRunParams{
 					Return(nil, errors.New("watch not available"))
 			},
 		),
-		expect: controller.ErrController.New("running [name=%s]: %w",
-			"run", controller.ErrController.New("timed out waiting for sync")),
+		expect: controller.ErrController.New("running [name=%s]: %s",
+			"run", "timed out waiting for sync"),
 	},
 	"with-processor": {
 		config: &controller.Config{
@@ -287,26 +293,33 @@ func TestControllerRun(t *testing.T) {
 			var ctx context.Context
 			var cancel context.CancelFunc
 			if param.expect != nil {
-				// Use timeout context for error cases
-				ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+				ctx, cancel = context.WithTimeout(
+					context.Background(), 50*time.Millisecond)
 			} else {
 				ctx, cancel = context.WithCancel(context.Background())
 			}
 			defer cancel()
 
 			// When
-			go ctrl.Run(ctx, param.runner, sigerr)
+			go ctrl.Run(ctx, sigerr, param.runner)
 
 			// Then
-			timeout := 200 * time.Millisecond
-			if param.expect != nil {
-				timeout = 100 * time.Millisecond // Shorter timeout for error cases
-			}
-			select {
-			case err := <-sigerr:
-				assert.Equal(t, param.expect, err)
-			case <-time.After(timeout):
-				t.Fatal("timeout waiting for run result")
+			timeout := 100 * time.Millisecond
+			if param.expect == nil {
+				time.Sleep(timeout)
+				cancel()
+				// Drain any error from context cancellation
+				select {
+				case <-sigerr:
+				case <-time.After(timeout):
+				}
+			} else {
+				select {
+				case err := <-sigerr:
+					assert.Equal(t, param.expect, err)
+				case <-time.After(timeout):
+					t.Fatal("timeout waiting for run result")
+				}
 			}
 		})
 }

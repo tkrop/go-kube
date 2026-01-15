@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -45,7 +46,7 @@ type LeaderConfig struct {
 type Runner interface {
 	// Run runs the given function with a context as soon as the instance of
 	// the runner with the given host identifier takes the lead.
-	Run(call func(ctx context.Context) error) error
+	Run(call func(ctx context.Context), errch chan error)
 }
 
 // DefaultRunner is the default implementation of a runner.
@@ -59,9 +60,9 @@ func NewDefaultRunner() Runner {
 // Run runs the given function with a context as soon as the instance of the
 // runner with the given host identifier takes the lead.
 func (*DefaultRunner) Run(
-	call func(ctx context.Context) error,
-) error {
-	return call(context.Background())
+	call func(ctx context.Context), _ chan error,
+) {
+	call(context.Background())
 }
 
 // LeaderRunner is the leader election default implementation.
@@ -99,73 +100,48 @@ func NewLeaderRunner(
 // Run will run the given function with a context as soon as the runner
 // instances identified by the given hostid takes the lead.
 func (r *LeaderRunner) Run(
-	call func(ctx context.Context) error,
-) error {
-	lock, err := r.InitResourceLock()
+	call func(ctx context.Context), errch chan error,
+) {
+	// Create the resource lock.
+	lock, err := resourcelock.New(resourcelock.LeasesResourceLock,
+		r.config.Namespace, r.config.Name, r.k8scli.CoreV1(),
+		r.k8scli.CoordinationV1(), resourcelock.ResourceLockConfig{
+			Identity: r.hostid,
+			EventRecorder: record.NewBroadcaster().
+				NewRecorder(scheme.Scheme, corev1.EventSource{
+					Component: r.config.Name, Host: r.hostid,
+				}),
+		})
 	if err != nil {
-		return err
+		errch <- ErrController.Wrap("creating lock [name=%s]: %w",
+			r.config.Name, err)
+
+		return
 	}
 
-	// Channel to get the function returning error.
-	errch := make(chan error, 1)
-
-	// The function to execute when start acquired.
-	start := func(ctx context.Context) {
-		select {
-		case <-ctx.Done():
-			errch <- nil
-		case errch <- call(ctx):
-		}
-	}
-	// The function to execute when leadership is lost.
-	stop := func() {
-		errch <- ErrController.New("leadership lost")
-	}
-
-	// Create the leader election configuration
+	// Create the leader election configuration.
 	config := leaderelection.LeaderElectionConfig{
 		Lock:          lock,
 		LeaseDuration: r.config.LeaseDuration,
 		RenewDeadline: r.config.RenewDeadline,
 		RetryPeriod:   r.config.RetryPeriod,
 		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: start,
-			OnStoppedLeading: stop,
+			OnStartedLeading: call,
+			OnStoppedLeading: func() {
+				errch <- ErrController.New("running [name=%s]: %w",
+					r.config.Name, errors.New("leadership lost"))
+			},
 		},
 	}
 
 	// Create the leader elector.
 	elector, err := leaderelection.NewLeaderElector(config)
 	if err != nil {
-		return ErrController.New("creating elector: %w", err)
+		errch <- ErrController.New("creating elector [name=%s]: %w",
+			r.config.Name, err)
+
+		return
 	}
 
 	go elector.Run(context.Background())
-
-	// Returns the final result.
-	return <-errch
-}
-
-// InitResourceLock will initialize the resource lock for leader election using
-// the given unique host identifier.
-func (r *LeaderRunner) InitResourceLock() (resourcelock.Interface, error) {
-	recorder := record.NewBroadcaster().
-		NewRecorder(scheme.Scheme, corev1.EventSource{
-			Component: r.config.Name, Host: r.hostid,
-		})
-
-	lock, err := resourcelock.New(
-		resourcelock.LeasesResourceLock,
-		r.config.Namespace, r.config.Name,
-		r.k8scli.CoreV1(), r.k8scli.CoordinationV1(),
-		resourcelock.ResourceLockConfig{
-			Identity:      r.hostid,
-			EventRecorder: recorder,
-		},
-	)
-	if err != nil {
-		return nil, ErrController.New("creating lock: %w", err)
-	}
-
-	return lock, nil
 }

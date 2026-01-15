@@ -28,21 +28,12 @@ import (
 // 3. Add improvements to the mock framework to be able to add optional mock
 //    calls in a sequence of calls.
 
-// CallSuccess returns a successful call function.
-func CallSuccess(_ context.Context) error {
-	return nil
-}
-
-// CallError returns an error call function.
-func CallError(_ context.Context) error {
-	return assert.AnError
-}
+// CallFast returns a successful call function.
+func CallFast(_ context.Context) {}
 
 // CallSlow returns a slow call function.
-func CallSlow(_ context.Context) error {
+func CallSlow(_ context.Context) {
 	time.Sleep(50 * time.Millisecond)
-
-	return nil
 }
 
 // CallK8sClientCoreV1 sets up the mock for the core methods.
@@ -76,37 +67,20 @@ var defaultLeaderConfig = &controller.LeaderConfig{
 	RetryPeriod:   20 * time.Millisecond,
 }
 
-type newDefaultRunnerParams struct{}
-
-var newDefaultRunnerTestCases = map[string]newDefaultRunnerParams{
-	"create-default-runner": {},
-}
-
-func TestNewDefaultRunner(t *testing.T) {
-	test.Map(t, newDefaultRunnerTestCases).
-		Run(func(t test.Test, _ newDefaultRunnerParams) {
-			// When
-			runner := controller.NewDefaultRunner()
-
-			// Then
-			assert.NotNil(t, runner)
-		})
-}
-
 type defaultRunnerRunParams struct {
-	call   func(ctx context.Context) error
+	call   func(ctx context.Context)
 	expect error
 }
 
 var defaultRunnerRunTestCases = map[string]defaultRunnerRunParams{
-	"successful-run": {
-		call:   CallSuccess,
+	"fast": {
+		call:   CallFast,
 		expect: nil,
 	},
 
-	"run-with-error": {
-		call:   CallError,
-		expect: assert.AnError,
+	"slow": {
+		call:   CallSlow,
+		expect: nil,
 	},
 }
 
@@ -115,12 +89,19 @@ func TestDefaultRunnerRun(t *testing.T) {
 		Run(func(t test.Test, param defaultRunnerRunParams) {
 			// Given
 			runner := controller.NewDefaultRunner()
+			errch := make(chan error, 1)
 
 			// When
-			err := runner.Run(param.call)
+			runner.Run(param.call, errch)
 
 			// Then
-			assert.Equal(t, param.expect, err)
+			select {
+			case err := <-errch:
+				assert.Equal(t, param.expect, err)
+			case <-time.After(100 * time.Millisecond):
+				assert.Equal(t, param.expect, nil,
+					"timed out waiting for error")
+			}
 		})
 }
 
@@ -164,7 +145,7 @@ type leaderRunnerRunParams struct {
 	setup  mock.SetupFunc
 	hostid string
 	config *controller.LeaderConfig
-	call   func(ctx context.Context) error
+	call   func(ctx context.Context)
 	expect error
 }
 
@@ -176,7 +157,7 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		),
 		hostid: "host-1",
 		config: defaultLeaderConfig,
-		call:   CallSuccess,
+		call:   CallFast,
 	},
 
 	"success-with-nil-config": {
@@ -185,7 +166,7 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 			CallK8sClientCoordinationV1(),
 		),
 		hostid: "host-1",
-		call:   CallSuccess,
+		call:   CallFast,
 	},
 
 	"error-hostid": {
@@ -195,23 +176,13 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		),
 		hostid: "",
 		config: defaultLeaderConfig,
-		call:   CallSuccess,
-		expect: controller.ErrController.New("creating elector: %w",
+		call:   CallFast,
+		expect: controller.ErrController.New(
+			"creating elector [name=%s]: %w", "controller",
 			//lint:ignore ST1005 // matching Kubernetes error message.
 			//nolint:staticcheck // matching Kubernetes error message.
 			errors.New("Lock identity is empty"),
 		),
-	},
-
-	"call-error": {
-		setup: mock.Chain(
-			CallK8sClientCoreV1(true),
-			CallK8sClientCoordinationV1(),
-		),
-		hostid: "host-1",
-		config: defaultLeaderConfig,
-		call:   CallError,
-		expect: assert.AnError,
 	},
 
 	"call-slow": {
@@ -237,10 +208,11 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 			RenewDeadline: 80 * time.Millisecond,
 			RetryPeriod:   20 * time.Millisecond,
 		},
-		call: CallSuccess,
+		call: CallFast,
 		expect: controller.ErrController.
-			New("creating elector: %w", errors.New(
-				"leaseDuration must be greater than renewDeadline")),
+			New("creating elector [name=%s]: %w",
+				"invalid-controller", errors.New(
+					"leaseDuration must be greater than renewDeadline")),
 	},
 
 	"minimal-valid-timings": {
@@ -253,7 +225,7 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 			RenewDeadline: 10 * time.Millisecond,
 			RetryPeriod:   2 * time.Millisecond,
 		},
-		call: CallSuccess,
+		call: CallFast,
 	},
 }
 
@@ -268,10 +240,18 @@ func TestLeaderRunnerRun(t *testing.T) {
 			runner := controller.NewLeaderRunner(
 				param.hostid, param.config, k8scli)
 
+			errch := make(chan error, 1)
+
 			// When
-			err := runner.Run(param.call)
+			runner.Run(param.call, errch)
 
 			// Then
-			assert.Equal(t, param.expect, err)
+			select {
+			case err := <-errch:
+				assert.Equal(t, param.expect, err)
+			case <-time.After(200 * time.Millisecond):
+				assert.Equal(t, param.expect, nil,
+					"timed out waiting for error")
+			}
 		})
 }

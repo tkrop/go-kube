@@ -65,7 +65,7 @@ type Controller[T runtime.Object] interface {
 	// AddHandler will add a new handler to the controller.
 	AddHandler(handler Handler[T], recorder Recorder) error
 	// Run starts the controller loop.
-	Run(ctx context.Context, runner Runner, sigerr chan error)
+	Run(ctx context.Context, errch chan error, runner Runner)
 }
 
 // controller is the implementation of the cache interface.
@@ -130,34 +130,27 @@ func (c *controller[T]) addHandler(handler *ResourceEventHandler[T]) error {
 
 // Run starts the controller loop.
 func (c *controller[T]) Run(
-	ctx context.Context, runner Runner, sigerr chan error,
+	ctx context.Context, errch chan error, runner Runner,
 ) {
-	sigerr <- ErrController.Wrap("running [name=%s]: %w",
-		c.config.Name, c.run(ctx, runner))
-}
-
-// run will run the controller.
-func (c *controller[T]) run(
-	ctx context.Context, runner Runner,
-) error {
 	go c.informer.Run(ctx.Done())
 
 	if !cache.WaitForCacheSync(ctx.Done(), c.informer.HasSynced) {
-		return ErrController.New("timed out waiting for sync")
+		errch <- ErrController.New("running [name=%s]: %s",
+			c.config.Name, "timed out waiting for sync")
 	}
 
 	if runner == nil {
-		return nil
+		return
 	}
 
-	//nolint:wrapcheck // common controller error used in runner.
-	return runner.Run(func(ctx context.Context) error {
-		for _, processor := range c.processor {
-			processor.Run(ctx)
-		}
+	runner.Run(c.run, errch)
+}
 
-		return nil
-	})
+// run runs all processors.
+func (c *controller[T]) run(ctx context.Context) {
+	for _, processor := range c.processor {
+		processor.Run(ctx)
+	}
 }
 
 // Get retrieves an resource object given by its key.
