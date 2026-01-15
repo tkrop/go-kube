@@ -8,6 +8,7 @@ package controller
 //go:generate mockgen -package=controller_test -destination=mock_controller_test.go -source=controller.go Retriever,Handler
 //go:generate mockgen -package=controller_test -destination=mock_recorder_test.go -source=recorder.go Recorder
 //go:generate mockgen -package=controller_test -destination=mock_resource_test.go -source=resource.go Resource
+//go:generate mockgen -package=controller_test -destination=mock_runnable_test.go -source=runner.go Runnable
 //go:generate mockgen -package=controller_test -destination=mock_watcher_test.go -mock_names=Interface=MockWatcher k8s.io/apimachinery/pkg/watch Interface
 //go:generate mockgen -package=controller_test -destination=mock_indexer_test.go k8s.io/client-go/tools/cache Indexer
 //go:generate mockgen -package=controller_test -destination=mock_informer_test.go k8s.io/client-go/tools/cache SharedIndexInformer

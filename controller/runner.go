@@ -56,9 +56,7 @@ func NewDefaultRunner() Runner {
 
 // Run runs the given controllers using the given error channel for reporting
 // errors.
-func (*DefaultRunner) Run(
-	errch chan error, runnables ...Runnable,
-) {
+func (*DefaultRunner) Run(errch chan error, runnables ...Runnable) {
 	for _, run := range runnables {
 		go run.Run(context.Background(), errch)
 	}
@@ -80,9 +78,7 @@ type LeaderRunner struct {
 // host identifier for each instance of a leader eleaction runner, e.g. by
 // adding a universal unique identifier to the hostname.
 func NewLeaderRunner(
-	id string,
-	config *LeaderConfig,
-	k8scli kubernetes.Interface,
+	id string, config *LeaderConfig, k8scli kubernetes.Interface,
 ) Runner {
 	return &LeaderRunner{
 		id:     id,
@@ -93,9 +89,7 @@ func NewLeaderRunner(
 
 // Run runs the given controllers using leader election using the given error
 // channel for reporting errors.
-func (r *LeaderRunner) Run(
-	errch chan error, runnables ...Runnable,
-) {
+func (r *LeaderRunner) Run(errch chan error, runnables ...Runnable) {
 	// Create the resource lock.
 	lock, err := resourcelock.New(resourcelock.LeasesResourceLock,
 		r.config.Namespace, r.config.Name, r.k8scli.CoreV1(),

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/tkrop/go-testing/mock"
 	"github.com/tkrop/go-testing/test"
+	"go.uber.org/mock/gomock"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/tkrop/go-kube/controller"
@@ -28,11 +29,17 @@ import (
 // 3. Add improvements to the mock framework to be able to add optional mock
 //    calls in a sequence of calls.
 
-// TestRunnable is a runnable that completes immediately.
-type TestRunnable struct{}
-
-// Run implements the Runnable interface.
-func (TestRunnable) Run(_ context.Context, _ chan error) {}
+func CallMockRun(err error) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockRunnable).EXPECT().
+			Run(gomock.Not(gomock.Nil()), gomock.Not(gomock.Nil())).
+			DoAndReturn(func(_ context.Context, errch chan error) {
+				if err != nil {
+					errch <- err
+				}
+			})
+	}
+}
 
 // CallK8sClientCoreV1 sets up the mock for the core methods.
 func CallK8sClientCoreV1(core bool) mock.SetupFunc {
@@ -66,17 +73,29 @@ var defaultLeaderConfig = &controller.LeaderConfig{
 }
 
 type defaultRunnerRunParams struct {
-	runs   []controller.Runnable
-	expect error
+	setup     mock.SetupFunc
+	runnables int
+	expect    error
 }
 
 var defaultRunnerRunTestCases = map[string]defaultRunnerRunParams{
-	"single": {
-		runs: []controller.Runnable{TestRunnable{}},
+	"zero": {
+		runnables: 0,
 	},
-
+	"single": {
+		setup:     CallMockRun(nil),
+		runnables: 1,
+	},
 	"multiple": {
-		runs: []controller.Runnable{TestRunnable{}, TestRunnable{}},
+		setup: mock.Setup(
+			CallMockRun(nil), CallMockRun(nil), CallMockRun(nil),
+		),
+		runnables: 3,
+	},
+	"error": {
+		setup:     CallMockRun(assert.AnError),
+		runnables: 1,
+		expect:    assert.AnError,
 	},
 }
 
@@ -84,11 +103,17 @@ func TestDefaultRunnerRun(t *testing.T) {
 	test.Map(t, defaultRunnerRunTestCases).
 		Run(func(t test.Test, param defaultRunnerRunParams) {
 			// Given
+			mocks := mock.NewMocks(t).Expect(param.setup)
 			runner := controller.NewDefaultRunner()
+
+			runnables := make([]controller.Runnable, 0, param.runnables)
+			for range param.runnables {
+				runnables = append(runnables, mock.Get(mocks, NewMockRunnable))
+			}
 			errch := make(chan error, 1)
 
 			// When
-			runner.Run(errch, param.runs...)
+			runner.Run(errch, runnables...)
 
 			// Then
 			select {
@@ -102,22 +127,26 @@ func TestDefaultRunnerRun(t *testing.T) {
 }
 
 type leaderRunnerRunParams struct {
-	setup  mock.SetupFunc
-	config *controller.LeaderConfig
-	runs   []controller.Runnable
-	id     string
-	expect error
+	setup     mock.SetupFunc
+	config    *controller.LeaderConfig
+	id        string
+	runnables int
+	expect    error
 }
 
 var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
-	"success": {
+	"zero-id-error": {
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
 		),
 		config: defaultLeaderConfig,
-		runs:   []controller.Runnable{TestRunnable{}},
-		id:     "host-1",
+		expect: controller.ErrController.New(
+			"creating elector [name=%s]: %w", "controller",
+			//lint:ignore ST1005 // matching Kubernetes error message.
+			//nolint:staticcheck // matching Kubernetes error message.
+			errors.New("Lock identity is empty"),
+		),
 	},
 
 	"nil-config-error": {
@@ -126,24 +155,6 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 			CallK8sClientCoordinationV1(),
 			test.Panic("runtime error: "+
 				"invalid memory address or nil pointer dereference"),
-		),
-		runs: []controller.Runnable{TestRunnable{}},
-		id:   "host-1",
-	},
-
-	"hostid-error": {
-		setup: mock.Chain(
-			CallK8sClientCoreV1(true),
-			CallK8sClientCoordinationV1(),
-		),
-		config: defaultLeaderConfig,
-		runs:   []controller.Runnable{TestRunnable{}},
-		id:     "",
-		expect: controller.ErrController.New(
-			"creating elector [name=%s]: %w", "controller",
-			//lint:ignore ST1005 // matching Kubernetes error message.
-			//nolint:staticcheck // matching Kubernetes error message.
-			errors.New("Lock identity is empty"),
 		),
 	},
 
@@ -159,25 +170,56 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 			RenewDeadline: 80 * time.Millisecond,
 			RenewPeriod:   20 * time.Millisecond,
 		},
-		runs: []controller.Runnable{TestRunnable{}},
-		id:   "host-1",
+		id: "host-1",
 		expect: controller.ErrController.
 			New("creating elector [name=%s]: %w",
 				"invalid-controller", errors.New(
 					"leaseDuration must be greater than renewDeadline")),
 	},
 
+	"runabe-error": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+			CallMockRun(assert.AnError),
+		),
+		config: defaultLeaderConfig,
+		id:     "host-1", runnables: 1,
+		expect: assert.AnError,
+	},
+
+	"single-success": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+			CallMockRun(nil),
+		),
+		config: defaultLeaderConfig,
+		id:     "host-1", runnables: 1,
+	},
+
+	"multiple-success": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+			CallMockRun(nil), CallMockRun(nil), CallMockRun(nil),
+		),
+		config: defaultLeaderConfig,
+		id:     "host-1", runnables: 3,
+	},
+
 	"minimal-valid-timings": {
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
-			CallK8sClientCoordinationV1()),
+			CallK8sClientCoordinationV1(),
+			CallMockRun(nil),
+		),
 		config: &controller.LeaderConfig{
 			LeaseDuration: 15 * time.Millisecond,
 			RenewDeadline: 10 * time.Millisecond,
 			RenewPeriod:   2 * time.Millisecond,
 		},
-		runs: []controller.Runnable{TestRunnable{}},
-		id:   "host-1",
+		id: "host-1", runnables: 1,
 	},
 }
 
@@ -192,10 +234,15 @@ func TestLeaderRunnerRun(t *testing.T) {
 			runner := controller.NewLeaderRunner(
 				param.id, param.config, k8scli)
 
+			runnables := make([]controller.Runnable, 0, param.runnables)
+			for range param.runnables {
+				runnables = append(runnables, mock.Get(mocks, NewMockRunnable))
+			}
+
 			errch := make(chan error, 1)
 
 			// When
-			runner.Run(errch, param.runs...)
+			runner.Run(errch, runnables...)
 
 			// Then
 			select {

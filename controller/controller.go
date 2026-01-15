@@ -133,9 +133,7 @@ func (c *controller[T]) addHandler(handler *ResourceEventHandler[T]) error {
 // Run starts the controller loop by starting the informer, waiting until the
 // cache is syncing, before creating the worker pools that are running the
 // processors.
-func (c *controller[T]) Run(
-	ctx context.Context, errch chan error,
-) {
+func (c *controller[T]) Run(ctx context.Context, errch chan error) {
 	go c.informer.Run(ctx.Done())
 
 	if !cache.WaitForCacheSync(ctx.Done(), c.informer.HasSynced) {
