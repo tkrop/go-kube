@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
+	model "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tkrop/go-testing/test"
@@ -272,7 +272,7 @@ func TestRegisterLen(t *testing.T) {
 
 func getMetricFamilies(
 	t test.Test, reg *prometheus.Registry,
-) []*dto.MetricFamily {
+) []*model.MetricFamily {
 	metrics, err := reg.Gather()
 	require.NoError(t, err)
 
@@ -280,9 +280,9 @@ func getMetricFamilies(
 }
 
 func findMetric(
-	t test.Test, families []*dto.MetricFamily,
+	t test.Test, families []*model.MetricFamily,
 	name string, labels ...string,
-) *dto.Metric {
+) *model.Metric {
 	for _, family := range families {
 		if family.GetName() == name {
 			for _, metric := range family.GetMetric() {
@@ -298,18 +298,18 @@ func findMetric(
 }
 
 func findHistogram(
-	t test.Test, families []*dto.MetricFamily,
+	t test.Test, families []*model.MetricFamily,
 	name string, labels ...string,
-) *dto.Histogram {
+) *model.Histogram {
 	metric := findMetric(t, families, name, labels...)
 
 	return metric.GetHistogram()
 }
 
 func findGauge(
-	t test.Test, families []*dto.MetricFamily,
+	t test.Test, families []*model.MetricFamily,
 	name string, controller string,
-) *dto.Metric {
+) *model.Metric {
 	for _, family := range families {
 		if family.GetName() == name {
 			for _, metric := range family.GetMetric() {
@@ -328,7 +328,7 @@ func findGauge(
 	return nil
 }
 
-func matchLabels(metric *dto.Metric, labelValues ...string) bool {
+func matchLabels(metric *model.Metric, labelValues ...string) bool {
 	labels := metric.GetLabel()
 	if len(labels) != len(labelValues) {
 		return false

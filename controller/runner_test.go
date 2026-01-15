@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/mock/gomock"
+	"k8s.io/client-go/kubernetes/fake"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/tkrop/go-testing/mock"
 	"github.com/tkrop/go-testing/test"
-	"go.uber.org/mock/gomock"
-	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/tkrop/go-kube/controller"
 )
@@ -24,11 +25,21 @@ import (
 // and renewal timings added by the leader election logic.
 //
 // For better testing we need three main improvements:
-// 1. Find a way to control the detached routine used for the lease renewals,
-// 2. Find a way to control the lease and renewal timings, and
-// 3. Add improvements to the mock framework to be able to add optional mock
-//    calls in a sequence of calls.
-
+//  1. Find a way to control the detached routine used for the lease renewals,
+//  2. Find a way to control the lease and renewal timings, and
+//  3. Add improvements to the mock framework to be able to add optional mock
+//     calls in a sequence of calls.
+//
+// NOTE: The resourcelock.New error path (runner.go:108-113) is currently
+// unreachable because:
+//  1. resourcelock.New only fails for invalid/deprecated lock types
+//  2. We hardcode resourcelock.LeasesResourceLock which is valid
+//  3. resourcelock.New does NOT validate nil CoreV1/CoordinationV1 clients
+//  4. The only way to trigger this would be to pass an invalid lock type,
+//     but that would require making the lock type configurable
+//
+// This represents architectural dead code that provides defensive error
+// handling for future API changes.
 func CallMockRun(err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockRunnable).EXPECT().
@@ -113,7 +124,7 @@ func TestDefaultRunnerRun(t *testing.T) {
 			errch := make(chan error, 1)
 
 			// When
-			runner.Run(errch, runnables...)
+			runner.Run(ctx, errch, runnables...)
 
 			// Then
 			select {
@@ -131,7 +142,12 @@ type leaderRunnerRunParams struct {
 	config    *controller.LeaderConfig
 	id        string
 	runnables int
-	expect    error
+	call      func(
+		runner controller.Runner,
+		runnables []controller.Runnable,
+		errch chan error,
+	)
+	expect error
 }
 
 var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
@@ -188,7 +204,16 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		expect: assert.AnError,
 	},
 
-	"single-success": {
+	"zero-runnable": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		config: defaultLeaderConfig,
+		id:     "host-zero", runnables: 0,
+	},
+
+	"single-runnable": {
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
@@ -198,7 +223,7 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		id:     "host-1", runnables: 1,
 	},
 
-	"multiple-success": {
+	"multiple-runnables": {
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
@@ -221,6 +246,70 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		},
 		id: "host-1", runnables: 1,
 	},
+
+	"ctx-cancel-before-leadership": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		config: defaultLeaderConfig,
+		id:     "host-cancel-1", runnables: 0,
+		call: func(
+			runner controller.Runner,
+			runnables []controller.Runnable,
+			errch chan error,
+		) {
+			cancelCtx, cancel := context.WithCancel(ctx)
+			cancel()
+			runner.Run(cancelCtx, errch, runnables...)
+		},
+		expect: controller.ErrController.New("running [name=%s]: %w",
+			"controller", errors.New("leadership lost")),
+	},
+
+	"ctx-cancel-during-leadership": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+			CallMockRun(nil),
+		),
+		config: defaultLeaderConfig,
+		id:     "host-cancel-2", runnables: 1,
+		call: func(
+			runner controller.Runner,
+			runnables []controller.Runnable,
+			errch chan error,
+		) {
+			cancelCtx, cancel := context.WithCancel(ctx)
+			runner.Run(cancelCtx, errch, runnables...)
+			time.Sleep(150 * time.Millisecond)
+			cancel()
+		},
+		expect: controller.ErrController.New("running [name=%s]: %w",
+			"controller", errors.New("leadership lost")),
+	},
+
+	"ctx-timeout": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		config: defaultLeaderConfig,
+		id:     "host-timeout", runnables: 0,
+		call: func(
+			runner controller.Runner,
+			runnables []controller.Runnable,
+			errch chan error,
+		) {
+			timeoutCtx, cancel := context.WithTimeout(
+				ctx, 50*time.Millisecond)
+			defer cancel()
+			runner.Run(timeoutCtx, errch, runnables...)
+			time.Sleep(100 * time.Millisecond)
+		},
+		expect: controller.ErrController.New("running [name=%s]: %w",
+			"controller", errors.New("leadership lost")),
+	},
 }
 
 func TestLeaderRunnerRun(t *testing.T) {
@@ -242,7 +331,11 @@ func TestLeaderRunnerRun(t *testing.T) {
 			errch := make(chan error, 1)
 
 			// When
-			runner.Run(errch, runnables...)
+			if param.call != nil {
+				param.call(runner, runnables, errch)
+			} else {
+				runner.Run(ctx, errch, runnables...)
+			}
 
 			// Then
 			select {

@@ -4,13 +4,14 @@ import (
 	"context"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/tkrop/go-testing/mock"
-	"github.com/tkrop/go-testing/test"
 	"go.uber.org/mock/gomock"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/tkrop/go-testing/mock"
+	"github.com/tkrop/go-testing/test"
 
 	"github.com/tkrop/go-kube/controller"
 	"github.com/tkrop/go-kube/errors"
@@ -25,7 +26,7 @@ var (
 )
 
 // CallResourceList sets up the mock for the List method.
-func CallResourceList(obj **List, err error) mock.SetupFunc {
+func CallResourceList(obj *List, err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockResource[*List]).EXPECT().
 			List(gomock.Any(), testOptions).Return(obj, err)
@@ -61,21 +62,21 @@ func GetNilResourceFunc() func(
 	}
 }
 
-func GetHandleNoop() func(ctx context.Context, obj **List) error {
-	return func(_ context.Context, _ **List) error {
+func GetHandleNoop() func(ctx context.Context, obj *List) error {
+	return func(_ context.Context, _ *List) error {
 		return nil
 	}
 }
 
-func GetHandleError() func(ctx context.Context, obj **List) error {
-	return func(_ context.Context, _ **List) error {
+func GetHandleError() func(ctx context.Context, obj *List) error {
+	return func(_ context.Context, _ *List) error {
 		return assert.AnError
 	}
 }
 
-func GetHandleValid() func(_ context.Context, obj **List) error {
-	return func(_ context.Context, obj **List) error {
-		if obj == nil || *obj == nil {
+func GetHandleValid() func(_ context.Context, obj *List) error {
+	return func(_ context.Context, obj *List) error {
+		if obj == nil {
 			return assert.AnError
 		}
 
@@ -85,7 +86,7 @@ func GetHandleValid() func(_ context.Context, obj **List) error {
 
 type newResourceParams struct {
 	resource func(namespace string) controller.Resource[*List]
-	handle   func(_ context.Context, obj **List) error
+	handle   func(_ context.Context, obj *List) error
 	error    *errors.Error
 }
 
@@ -112,15 +113,15 @@ func TestNewResource(t *testing.T) {
 type resourceListParams struct {
 	setup   mock.SetupFunc
 	options metav1.ListOptions
-	expect  **List
+	expect  *List
 	error   error
 }
 
 var resourceListTestCases = map[string]resourceListParams{
 	"success": {
-		setup:   CallResourceList(&testList, nil),
+		setup:   CallResourceList(testList, nil),
 		options: testOptions,
-		expect:  &testList,
+		expect:  testList,
 	},
 
 	"resource-error": {
@@ -193,7 +194,7 @@ func TestResourceWatch(t *testing.T) {
 type resourceHandleParams struct {
 	setup  mock.SetupFunc
 	obj    runtime.Object
-	handle func(ctx context.Context, obj **List) error
+	handle func(ctx context.Context, obj *List) error
 	error  error
 }
 
@@ -239,5 +240,46 @@ func TestResourceHandle(t *testing.T) {
 
 			// Then
 			assert.Equal(t, param.error, err)
+		})
+}
+
+type resourceNotifyParams struct {
+	msg   string
+	error error
+}
+
+var resourceNotifyTestCases = map[string]resourceNotifyParams{
+	"with-error": {
+		msg:   "processing failed",
+		error: assert.AnError,
+	},
+
+	"with-nil-error": {
+		msg:   "unexpected nil error",
+		error: nil,
+	},
+
+	"with-wrapped-error": {
+		msg:   "complex error scenario",
+		error: testError.New("wrapped error: %w", assert.AnError),
+	},
+}
+
+func TestResourceNotify(t *testing.T) {
+	test.Map(t, resourceNotifyTestCases).
+		Run(func(t test.Test, param resourceNotifyParams) {
+			// Given
+			mocks := mock.NewMocks(t)
+			resource := test.Cast[*controller.ResourceImpl[*List]](
+				controller.NewResource(
+					GetMockResourceFunc(mocks),
+					GetHandleNoop(), *testError,
+				),
+			)
+
+			// When
+			resource.Notify(ctx, param.msg, param.error)
+
+			// Then
 		})
 }
