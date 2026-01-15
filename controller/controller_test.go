@@ -157,7 +157,7 @@ var controllerAddHandlerTestCases = map[string]controllerAddHandlerParams{
 		before: func(ctrl controller.Controller[*corev1.Pod]) {
 			ctx, cancel := context.WithCancel(context.Background())
 			sigerr := make(chan error, 1)
-			go ctrl.Run(ctx, sigerr, nil)
+			go ctrl.Run(ctx, sigerr)
 			time.Sleep(100 * time.Millisecond)
 			cancel()
 			// Wait with timeout for controller to shut down
@@ -209,23 +209,15 @@ type controllerRunParams struct {
 	config *controller.Config
 	setup  mock.SetupFunc
 	before func(ctrl controller.Controller[*corev1.Pod], mocks *mock.Mocks)
-	runner controller.Runner
 	expect error
 }
 
 var controllerRunTestCases = map[string]controllerRunParams{
-	"no-runner": {
-		setup: mock.Chain(
-			CallRetrieverWatchEndless(),
-			CallRetrieverList(NewList(p1, p2), nil),
-		),
-	},
 	"success": {
 		setup: mock.Chain(
 			CallRetrieverWatchEndless(),
 			CallRetrieverList(NewList(d1, p1, p2, p3, p4, p5, p6, p7), nil),
 		),
-		runner: controller.NewDefaultRunner(),
 	},
 	"timeout": {
 		setup: mock.Parallel(
@@ -267,7 +259,6 @@ var controllerRunTestCases = map[string]controllerRunParams{
 			recorder := mock.Get(mocks, NewMockRecorder)
 			_ = ctrl.AddHandler(handler, recorder)
 		},
-		runner: controller.NewDefaultRunner(),
 	},
 }
 
@@ -301,7 +292,7 @@ func TestControllerRun(t *testing.T) {
 			defer cancel()
 
 			// When
-			go ctrl.Run(ctx, sigerr, param.runner)
+			go ctrl.Run(ctx, sigerr)
 
 			// Then
 			timeout := 100 * time.Millisecond

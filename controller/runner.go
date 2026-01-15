@@ -13,16 +13,6 @@ import (
 	"k8s.io/client-go/tools/record"
 )
 
-// Default leader election timings.
-const (
-	// Default leader election lease duration.
-	defLeaseDuration = 15 * time.Second
-	// Default leader election renew deadline.
-	defRenewDeadline = 10 * time.Second
-	// Default leader election retry period.
-	defRetryPeriod = 2 * time.Second
-)
-
 // LeaderConfig is the configuration for the leader election, i.e. lease
 // duration, renew deadline, and retry period.
 type LeaderConfig struct {
@@ -30,23 +20,30 @@ type LeaderConfig struct {
 	Name string `default:"controller"`
 	// Namespace is the namespace of the resource lock.
 	Namespace string `default:"default"`
+
 	// LeaseDuration is the duration that non-leader candidates will
 	// wait to force acquire leadership. This is measured against time of
 	// last observed ack.
 	LeaseDuration time.Duration `default:"15s"`
-	// RenewDeadline is the duration that the acting master will retry
+	// RenewDeadline is the duration that the acting leader will retry
 	// refreshing leadership before giving up.
 	RenewDeadline time.Duration `default:"10s"`
-	// RetryPeriod is the duration the LeaderElector clients should wait
+	// RenewPeriod is the duration the leader elector clients should wait
 	// between tries of actions.
-	RetryPeriod time.Duration `default:"2s"`
+	RenewPeriod time.Duration `default:"2s"`
+}
+
+type Runnable interface {
+	// Run runs the runnable using the given context and error channel for
+	// reporting errors.
+	Run(ctx context.Context, errch chan error)
 }
 
 // Runner knows how to run the processing queue.
 type Runner interface {
-	// Run runs the given function with a context as soon as the instance of
-	// the runner with the given host identifier takes the lead.
-	Run(call func(ctx context.Context), errch chan error)
+	// Run runs the given controllers using the given error channel for
+	// reporting errors.
+	Run(errch chan error, runnables ...Runnable)
 }
 
 // DefaultRunner is the default implementation of a runner.
@@ -57,19 +54,22 @@ func NewDefaultRunner() Runner {
 	return &DefaultRunner{}
 }
 
-// Run runs the given function with a context as soon as the instance of the
-// runner with the given host identifier takes the lead.
-func (*DefaultRunner) Run(
-	call func(ctx context.Context), _ chan error,
-) {
-	call(context.Background())
+// Run runs the given controllers using the given error channel for reporting
+// errors.
+func (*DefaultRunner) Run(errch chan error, runnables ...Runnable) {
+	for _, run := range runnables {
+		go run.Run(context.Background(), errch)
+	}
 }
 
 // LeaderRunner is the leader election default implementation.
 type LeaderRunner struct {
-	hostid string
-	k8scli kubernetes.Interface
+	// Unique identifier of the runner instance.
+	id string
+	// Leader election configuration.
 	config *LeaderConfig
+	// Kubernetes client.
+	k8scli kubernetes.Interface
 }
 
 // NewLeaderRunner returns a new leader election runner with given unique host
@@ -78,38 +78,26 @@ type LeaderRunner struct {
 // host identifier for each instance of a leader eleaction runner, e.g. by
 // adding a universal unique identifier to the hostname.
 func NewLeaderRunner(
-	hostid string,
-	config *LeaderConfig,
-	k8scli kubernetes.Interface,
+	id string, config *LeaderConfig, k8scli kubernetes.Interface,
 ) Runner {
-	if config == nil {
-		config = &LeaderConfig{
-			LeaseDuration: defLeaseDuration,
-			RenewDeadline: defRenewDeadline,
-			RetryPeriod:   defRetryPeriod,
-		}
-	}
-
 	return &LeaderRunner{
-		hostid: hostid,
+		id:     id,
 		config: config,
 		k8scli: k8scli,
 	}
 }
 
-// Run will run the given function with a context as soon as the runner
-// instances identified by the given hostid takes the lead.
-func (r *LeaderRunner) Run(
-	call func(ctx context.Context), errch chan error,
-) {
+// Run runs the given controllers using leader election using the given error
+// channel for reporting errors.
+func (r *LeaderRunner) Run(errch chan error, runnables ...Runnable) {
 	// Create the resource lock.
 	lock, err := resourcelock.New(resourcelock.LeasesResourceLock,
 		r.config.Namespace, r.config.Name, r.k8scli.CoreV1(),
 		r.k8scli.CoordinationV1(), resourcelock.ResourceLockConfig{
-			Identity: r.hostid,
+			Identity: r.id,
 			EventRecorder: record.NewBroadcaster().
 				NewRecorder(scheme.Scheme, corev1.EventSource{
-					Component: r.config.Name, Host: r.hostid,
+					Component: r.config.Name, Host: r.id,
 				}),
 		})
 	if err != nil {
@@ -124,9 +112,13 @@ func (r *LeaderRunner) Run(
 		Lock:          lock,
 		LeaseDuration: r.config.LeaseDuration,
 		RenewDeadline: r.config.RenewDeadline,
-		RetryPeriod:   r.config.RetryPeriod,
+		RetryPeriod:   r.config.RenewPeriod,
 		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: call,
+			OnStartedLeading: func(ctx context.Context) {
+				for _, runnable := range runnables {
+					go runnable.Run(ctx, errch)
+				}
+			},
 			OnStoppedLeading: func() {
 				errch <- ErrController.New("running [name=%s]: %w",
 					r.config.Name, errors.New("leadership lost"))

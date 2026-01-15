@@ -64,8 +64,10 @@ type Controller[T runtime.Object] interface {
 	List(namespace, name string, uid types.UID) []T
 	// AddHandler will add a new handler to the controller.
 	AddHandler(handler Handler[T], recorder Recorder) error
-	// Run starts the controller loop.
-	Run(ctx context.Context, errch chan error, runner Runner)
+	// Run starts the controller loop by starting the informer, waiting until
+	// the cache is syncing, before creating the worker pools that are running
+	// the processors.
+	Run(ctx context.Context, errch chan error)
 }
 
 // controller is the implementation of the cache interface.
@@ -128,10 +130,10 @@ func (c *controller[T]) addHandler(handler *ResourceEventHandler[T]) error {
 	return nil
 }
 
-// Run starts the controller loop.
-func (c *controller[T]) Run(
-	ctx context.Context, errch chan error, runner Runner,
-) {
+// Run starts the controller loop by starting the informer, waiting until the
+// cache is syncing, before creating the worker pools that are running the
+// processors.
+func (c *controller[T]) Run(ctx context.Context, errch chan error) {
 	go c.informer.Run(ctx.Done())
 
 	if !cache.WaitForCacheSync(ctx.Done(), c.informer.HasSynced) {
@@ -139,15 +141,6 @@ func (c *controller[T]) Run(
 			c.config.Name, "timed out waiting for sync")
 	}
 
-	if runner == nil {
-		return
-	}
-
-	runner.Run(c.run, errch)
-}
-
-// run runs all processors.
-func (c *controller[T]) run(ctx context.Context) {
 	for _, processor := range c.processor {
 		processor.Run(ctx)
 	}
