@@ -28,13 +28,11 @@ import (
 // 3. Add improvements to the mock framework to be able to add optional mock
 //    calls in a sequence of calls.
 
-// CallFast returns a successful call function.
-func CallFast(_ context.Context) {}
+// TestRunnable is a runnable that completes immediately.
+type TestRunnable struct{}
 
-// CallSlow returns a slow call function.
-func CallSlow(_ context.Context) {
-	time.Sleep(50 * time.Millisecond)
-}
+// Run implements the Runnable interface.
+func (TestRunnable) Run(_ context.Context, _ chan error) {}
 
 // CallK8sClientCoreV1 sets up the mock for the core methods.
 func CallK8sClientCoreV1(core bool) mock.SetupFunc {
@@ -64,23 +62,21 @@ var defaultLeaderConfig = &controller.LeaderConfig{
 	Namespace:     "default",
 	LeaseDuration: 100 * time.Millisecond,
 	RenewDeadline: 80 * time.Millisecond,
-	RetryPeriod:   20 * time.Millisecond,
+	RenewPeriod:   20 * time.Millisecond,
 }
 
 type defaultRunnerRunParams struct {
-	call   func(ctx context.Context)
+	runs   []controller.Runnable
 	expect error
 }
 
 var defaultRunnerRunTestCases = map[string]defaultRunnerRunParams{
-	"fast": {
-		call:   CallFast,
-		expect: nil,
+	"single": {
+		runs: []controller.Runnable{TestRunnable{}},
 	},
 
-	"slow": {
-		call:   CallSlow,
-		expect: nil,
+	"multiple": {
+		runs: []controller.Runnable{TestRunnable{}, TestRunnable{}},
 	},
 }
 
@@ -92,7 +88,7 @@ func TestDefaultRunnerRun(t *testing.T) {
 			errch := make(chan error, 1)
 
 			// When
-			runner.Run(param.call, errch)
+			runner.Run(errch, param.runs...)
 
 			// Then
 			select {
@@ -105,47 +101,11 @@ func TestDefaultRunnerRun(t *testing.T) {
 		})
 }
 
-type newLeaderRunnerParams struct {
-	config *controller.LeaderConfig
-}
-
-var newLeaderRunnerTestCases = map[string]newLeaderRunnerParams{
-	"with-nil-config": {
-		config: nil,
-	},
-
-	"with-custom-config": {
-		config: &controller.LeaderConfig{
-			Name:          "custom-controller",
-			Namespace:     "kube-system",
-			LeaseDuration: 20 * time.Second,
-			RenewDeadline: 15 * time.Second,
-			RetryPeriod:   5 * time.Second,
-		},
-	},
-}
-
-func TestNewLeaderRunner(t *testing.T) {
-	test.Map(t, newLeaderRunnerTestCases).
-		Run(func(t test.Test, param newLeaderRunnerParams) {
-			// Given
-			mocks := mock.NewMocks(t)
-			k8scli := mock.Get(mocks, NewMockK8sClient)
-
-			// When
-			runner := controller.NewLeaderRunner(
-				t.Name(), param.config, k8scli)
-
-			// Then
-			assert.NotNil(t, runner)
-		})
-}
-
 type leaderRunnerRunParams struct {
 	setup  mock.SetupFunc
-	hostid string
 	config *controller.LeaderConfig
-	call   func(ctx context.Context)
+	runs   []controller.Runnable
+	id     string
 	expect error
 }
 
@@ -155,28 +115,30 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
 		),
-		hostid: "host-1",
 		config: defaultLeaderConfig,
-		call:   CallFast,
+		runs:   []controller.Runnable{TestRunnable{}},
+		id:     "host-1",
 	},
 
-	"success-with-nil-config": {
+	"nil-config-error": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+			test.Panic("runtime error: "+
+				"invalid memory address or nil pointer dereference"),
+		),
+		runs: []controller.Runnable{TestRunnable{}},
+		id:   "host-1",
+	},
+
+	"hostid-error": {
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
 		),
-		hostid: "host-1",
-		call:   CallFast,
-	},
-
-	"error-hostid": {
-		setup: mock.Chain(
-			CallK8sClientCoreV1(true),
-			CallK8sClientCoordinationV1(),
-		),
-		hostid: "",
 		config: defaultLeaderConfig,
-		call:   CallFast,
+		runs:   []controller.Runnable{TestRunnable{}},
+		id:     "",
 		expect: controller.ErrController.New(
 			"creating elector [name=%s]: %w", "controller",
 			//lint:ignore ST1005 // matching Kubernetes error message.
@@ -185,30 +147,20 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		),
 	},
 
-	"call-slow": {
+	"elector-config-error": {
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
 		),
-		hostid: "host-1",
-		config: defaultLeaderConfig,
-		call:   CallSlow,
-	},
-
-	"invalid-elector-config": {
-		setup: mock.Chain(
-			CallK8sClientCoreV1(true),
-			CallK8sClientCoordinationV1(),
-		),
-		hostid: "host-1",
 		config: &controller.LeaderConfig{
 			Name:          "invalid-controller",
 			Namespace:     "default",
 			LeaseDuration: 10 * time.Millisecond,
 			RenewDeadline: 80 * time.Millisecond,
-			RetryPeriod:   20 * time.Millisecond,
+			RenewPeriod:   20 * time.Millisecond,
 		},
-		call: CallFast,
+		runs: []controller.Runnable{TestRunnable{}},
+		id:   "host-1",
 		expect: controller.ErrController.
 			New("creating elector [name=%s]: %w",
 				"invalid-controller", errors.New(
@@ -219,13 +171,13 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1()),
-		hostid: "host-1",
 		config: &controller.LeaderConfig{
 			LeaseDuration: 15 * time.Millisecond,
 			RenewDeadline: 10 * time.Millisecond,
-			RetryPeriod:   2 * time.Millisecond,
+			RenewPeriod:   2 * time.Millisecond,
 		},
-		call: CallFast,
+		runs: []controller.Runnable{TestRunnable{}},
+		id:   "host-1",
 	},
 }
 
@@ -238,12 +190,12 @@ func TestLeaderRunnerRun(t *testing.T) {
 			k8scli := mock.Get(mocks, NewMockK8sClient)
 
 			runner := controller.NewLeaderRunner(
-				param.hostid, param.config, k8scli)
+				param.id, param.config, k8scli)
 
 			errch := make(chan error, 1)
 
 			// When
-			runner.Run(param.call, errch)
+			runner.Run(errch, param.runs...)
 
 			// Then
 			select {
