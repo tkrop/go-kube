@@ -4,16 +4,19 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tkrop/go-kube/controller"
-	"github.com/tkrop/go-testing/mock"
-	"github.com/tkrop/go-testing/test"
-	"go.uber.org/mock/gomock"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
+
+	"go.uber.org/mock/gomock"
+
+	"github.com/tkrop/go-testing/mock"
+	"github.com/tkrop/go-testing/test"
+
+	"github.com/tkrop/go-kube/controller"
 )
 
 // Config creates a basic controller Config for testing.

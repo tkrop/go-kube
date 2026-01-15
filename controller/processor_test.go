@@ -5,14 +5,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/tkrop/go-testing/mock"
-	"github.com/tkrop/go-testing/test"
-	"go.uber.org/mock/gomock"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
+
+	"go.uber.org/mock/gomock"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/tkrop/go-testing/mock"
+	"github.com/tkrop/go-testing/test"
 
 	"github.com/tkrop/go-kube/controller"
 )

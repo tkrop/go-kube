@@ -3,31 +3,32 @@ package controller
 import (
 	"context"
 
-	"github.com/tkrop/go-kube/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
+
+	log "github.com/sirupsen/logrus"
+
+	"github.com/tkrop/go-kube/errors"
 )
 
-// Resource is the interface for managing Kubernetes resources.
+// Resource is the resource interface for managing a Kubernetes resource.
 type Resource[T runtime.Object] interface {
-	// List lists the resources.
-	List(ctx context.Context, opts metav1.ListOptions) (*T, error)
-	// Watch watches for changes in the resource.
-	Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error)
+	Retriever[T]
+	Handler[T]
 }
 
 // ResourceImpl is the implementation of the Resource interface.
 type ResourceImpl[T runtime.Object] struct {
 	resource func(namespace string) Resource[T]
-	handle   func(ctx context.Context, obj *T) error
+	handle   func(ctx context.Context, obj T) error
 	base     errors.Error
 }
 
 // NewResource creates a new resource event handler.
 func NewResource[T runtime.Object](
 	resource func(namespace string) Resource[T],
-	handle func(ctx context.Context, obj *T) error,
+	handle func(ctx context.Context, obj T) error,
 	base errors.Error,
 ) Resource[T] {
 	return &ResourceImpl[T]{
@@ -40,7 +41,7 @@ func NewResource[T runtime.Object](
 // List retrieves a list of resources. Used by the retriever.
 func (r *ResourceImpl[T]) List(
 	ctx context.Context, options metav1.ListOptions,
-) (*T, error) {
+) (runtime.Object, error) {
 	obj, err := r.resource("").List(ctx, options)
 
 	return obj, r.base.Wrap("failed to retrieve: %w", err)
@@ -62,6 +63,15 @@ func (r *ResourceImpl[T]) Handle(
 	if typed, ok := obj.(T); !ok {
 		return r.base.New("invalid type [type=%T]", obj)
 	} else {
-		return r.handle(ctx, &typed)
+		return r.handle(ctx, typed)
 	}
+}
+
+// Notify notifies about errors during processing. Called by the controller.
+func (r *ResourceImpl[T]) Notify(
+	_ context.Context, msg string, err error,
+) {
+	log.WithError(err).WithFields(log.Fields{
+		"handler": r.base.Error(),
+	}).Error(msg)
 }

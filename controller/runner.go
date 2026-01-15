@@ -41,9 +41,9 @@ type Runnable interface {
 
 // Runner knows how to run the processing queue.
 type Runner interface {
-	// Run runs the given controllers using the given error channel for
-	// reporting errors.
-	Run(errch chan error, runnables ...Runnable)
+	// Run runs the given set of controllers using the given context and error
+	// channel for reporting errors.
+	Run(ctx context.Context, errch chan error, runnables ...Runnable)
 }
 
 // DefaultRunner is the default implementation of a runner.
@@ -54,11 +54,13 @@ func NewDefaultRunner() Runner {
 	return &DefaultRunner{}
 }
 
-// Run runs the given controllers using the given error channel for reporting
-// errors.
-func (*DefaultRunner) Run(errch chan error, runnables ...Runnable) {
+// Run runs the given set of controllers using the given context and error
+// channel for reporting errors.
+func (*DefaultRunner) Run(
+	ctx context.Context, errch chan error, runnables ...Runnable,
+) {
 	for _, run := range runnables {
-		go run.Run(context.Background(), errch)
+		go run.Run(ctx, errch)
 	}
 }
 
@@ -87,9 +89,11 @@ func NewLeaderRunner(
 	}
 }
 
-// Run runs the given controllers using leader election using the given error
+// Run runs the given set of controllers using the given context and error
 // channel for reporting errors.
-func (r *LeaderRunner) Run(errch chan error, runnables ...Runnable) {
+func (r *LeaderRunner) Run(
+	ctx context.Context, errch chan error, runnables ...Runnable,
+) {
 	// Create the resource lock.
 	lock, err := resourcelock.New(resourcelock.LeasesResourceLock,
 		r.config.Namespace, r.config.Name, r.k8scli.CoreV1(),
@@ -101,6 +105,7 @@ func (r *LeaderRunner) Run(errch chan error, runnables ...Runnable) {
 				}),
 		})
 	if err != nil {
+		// #no-cover: impossible to reach due to using right lock type.
 		errch <- ErrController.Wrap("creating lock [name=%s]: %w",
 			r.config.Name, err)
 
@@ -135,5 +140,5 @@ func (r *LeaderRunner) Run(errch chan error, runnables ...Runnable) {
 		return
 	}
 
-	go elector.Run(context.Background())
+	go elector.Run(ctx)
 }
