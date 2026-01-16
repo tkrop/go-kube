@@ -79,6 +79,20 @@ func (l *List) GetObjectKind() schema.ObjectKind {
 	return &l.TypeMeta
 }
 
+// NewPodList creates a new PodList with given Pod items.
+func NewPodList(items ...any) *corev1.PodList {
+	pods := make([]corev1.Pod, 0, len(items))
+	for _, item := range items {
+		if pod, ok := item.(*corev1.Pod); ok && pod != nil {
+			pods = append(pods, *pod)
+		}
+	}
+
+	return &corev1.PodList{
+		Items: pods,
+	}
+}
+
 // *** Indexer mocks setup functions. ***
 
 // GetIndexer retrieves the indexer from mocks if no indexer is provided.
@@ -117,11 +131,9 @@ func CallGetByKey(
 // *** Retriever mocks setup functions. ***
 
 // CallRetrieverList sets up the expectation for the retriever list call.
-func CallRetrieverList(
-	list runtime.Object, err error,
-) mock.SetupFunc {
+func CallRetrieverList[T runtime.Object](list T, err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
-		return mock.Get(mocks, NewMockRetriever[*corev1.Pod]).EXPECT().
+		return mock.Get(mocks, NewMockRetriever[T]).EXPECT().
 			List(gomock.Any(), gomock.Any()).Return(list, err)
 	}
 }
@@ -132,11 +144,11 @@ func CallRetrieverList(
 // TODO: while this works, it would be better to have a way to block after
 // the first call to the watcher, so that we can control when to continue and
 // stop it in the tests to avoid endless repetition.
-func CallRetrieverWatchEndless() mock.SetupFunc {
+func CallRetrieverWatchEndless[T runtime.Object]() mock.SetupFunc {
 	return mock.Setup(
 		func(mocks *mock.Mocks) any {
 			return test.Cast[*gomock.Call](
-				CallRetrieverWatch(nil)(mocks)).AnyTimes()
+				CallRetrieverWatch[T](nil)(mocks)).AnyTimes()
 		},
 		func(mocks *mock.Mocks) any {
 			return test.Cast[*gomock.Call](
@@ -150,18 +162,20 @@ func CallRetrieverWatchEndless() mock.SetupFunc {
 }
 
 // CallRetrieverWatchStop sets up the expectation for the retriever watch call.
-func CallRetrieverWatchStop(err error, events ...watch.Event) mock.SetupFunc {
+func CallRetrieverWatchStop[T runtime.Object](
+	err error, events ...watch.Event,
+) mock.SetupFunc {
 	return mock.Chain(
-		CallRetrieverWatch(err),
+		CallRetrieverWatch[T](err),
 		CallWatcherResult(events...),
 		CallWatcherStop(),
 	)
 }
 
 // CallRetrieverWatch sets up the expectation for the retriever watch call.
-func CallRetrieverWatch(err error) mock.SetupFunc {
+func CallRetrieverWatch[T runtime.Object](err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
-		return mock.Get(mocks, NewMockRetriever[*corev1.Pod]).EXPECT().
+		return mock.Get(mocks, NewMockRetriever[T]).EXPECT().
 			Watch(gomock.Any(), gomock.Any()).
 			Return(mock.Get(mocks, NewMockWatcher), err)
 	}

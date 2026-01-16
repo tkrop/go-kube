@@ -2,7 +2,6 @@ package controller_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -11,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 
 	"go.uber.org/mock/gomock"
@@ -21,6 +21,7 @@ import (
 	"github.com/tkrop/go-testing/test"
 
 	"github.com/tkrop/go-kube/controller"
+	"github.com/tkrop/go-kube/errors"
 )
 
 // TODO: this is an AI generated test that needs to be reviewed and improved.
@@ -99,6 +100,15 @@ func CallHandlerNotifyAny() mock.SetupFunc {
 	}
 }
 
+// TODO: integrate with tests.
+func TestResource(t *testing.T) {
+	client := fake.NewClientset()
+	ctrl := controller.New[*corev1.Pod](Config("add-handler"),
+		controller.NewRetriever(client.CoreV1().Pods(""), testError),
+		cache.Indexers{})
+	assert.NotNil(t, ctrl)
+}
+
 type controllerNewParams struct {
 	config   *controller.Config
 	indexers cache.Indexers
@@ -128,7 +138,7 @@ func TestControllerNew(t *testing.T) {
 		Run(func(t test.Test, param controllerNewParams) {
 			// Given
 			mocks := mock.NewMocks(t)
-			retriever := mock.Get(mocks, NewMockRetriever[*corev1.Pod])
+			retriever := mock.Get(mocks, NewMockRetriever[*corev1.PodList])
 
 			// When
 			ctrl := controller.New[*corev1.Pod](
@@ -151,8 +161,8 @@ var controllerAddHandlerTestCases = map[string]controllerAddHandlerParams{
 	},
 	"error": {
 		setup: mock.Chain(
-			CallRetrieverWatchEndless(),
-			CallRetrieverList(NewList(p1, p2), nil),
+			CallRetrieverWatchEndless[*corev1.PodList](),
+			CallRetrieverList(NewPodList(p1, p2), nil),
 			CallRecorderLen("add-handler"),
 		),
 		before: func(ctrl controller.Controller[*corev1.Pod]) {
@@ -185,8 +195,9 @@ func TestControllerAddHandler(t *testing.T) {
 		Run(func(t test.Test, param controllerAddHandlerParams) {
 			// Given
 			mocks := mock.NewMocks(t).Expect(param.setup)
-			ctrl := controller.New[*corev1.Pod](Config("add-handler"),
-				mock.Get(mocks, NewMockRetriever[*corev1.Pod]),
+			ctrl := controller.New[*corev1.Pod](
+				Config("add-handler"),
+				mock.Get(mocks, NewMockRetriever[*corev1.PodList]),
 				cache.Indexers{})
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			recorder := mock.Get(mocks, NewMockRecorder)
@@ -216,8 +227,8 @@ type controllerRunParams struct {
 var controllerRunTestCases = map[string]controllerRunParams{
 	"success": {
 		setup: mock.Chain(
-			CallRetrieverWatchEndless(),
-			CallRetrieverList(NewList(d1, p1, p2, p3, p4, p5, p6, p7), nil),
+			CallRetrieverWatchEndless[*corev1.PodList](),
+			CallRetrieverList(NewPodList(p1, p2, p3, p4, p5, p6, p7), nil),
 		),
 	},
 	"timeout": {
@@ -225,8 +236,8 @@ var controllerRunTestCases = map[string]controllerRunParams{
 			// TODO: find a better way to simulate timeout waiting for sync or
 			// create a call function that blocks until context is done.
 			func(mocks *mock.Mocks) any {
-				return mock.Get(mocks, NewMockRetriever[*corev1.Pod]).EXPECT().
-					List(gomock.Any(), gomock.Any()).
+				return mock.Get(mocks, NewMockRetriever[*corev1.PodList]).
+					EXPECT().List(gomock.Any(), gomock.Any()).
 					DoAndReturn(func(
 						ctx context.Context, _ metav1.ListOptions,
 					) (runtime.Object, error) {
@@ -236,9 +247,9 @@ var controllerRunTestCases = map[string]controllerRunParams{
 					})
 			},
 			func(mocks *mock.Mocks) any {
-				return mock.Get(mocks, NewMockRetriever[*corev1.Pod]).EXPECT().
+				return mock.Get(mocks, NewMockRetriever[*corev1.PodList]).EXPECT().
 					Watch(gomock.Any(), gomock.Any()).AnyTimes().
-					Return(nil, errors.New("watch not available"))
+					Return(nil, errors.NewError("watch not available"))
 			},
 		),
 		expect: controller.ErrController.New("running [name=%s]: %s",
@@ -249,9 +260,9 @@ var controllerRunTestCases = map[string]controllerRunParams{
 			Name: "run", Workers: 0, Sync: time.Minute,
 		},
 		setup: mock.Chain(
-			CallRetrieverWatchEndless(),
+			CallRetrieverWatchEndless[*corev1.PodList](),
 			CallRecorderLen("run"),
-			CallRetrieverList(NewList(p1, p2), nil),
+			CallRetrieverList(NewPodList(p1, p2), nil),
 			CallRecorderAddEvent(),
 			CallHandlerNotifyAny(),
 		),
@@ -273,10 +284,9 @@ func TestControllerRun(t *testing.T) {
 			if config == nil {
 				config = Config("run")
 			}
-			ctrl := controller.New[*corev1.Pod](config,
-				mock.Get(mocks, NewMockRetriever[*corev1.Pod]),
-				cache.Indexers{},
-			)
+			retriever := mock.Get(mocks, NewMockRetriever[*corev1.PodList])
+			ctrl := controller.New[*corev1.Pod](
+				config, retriever, cache.Indexers{})
 			if param.before != nil {
 				param.before(ctrl, mocks)
 			}
@@ -353,9 +363,9 @@ func TestControllerGet(t *testing.T) {
 		Run(func(t test.Test, param controllerGetParams) {
 			// Given
 			mocks := mock.NewMocks(t).Expect(param.setup)
-			ctrl := controller.New[*corev1.Pod](Config("get"),
-				mock.Get(mocks, NewMockRetriever[*corev1.Pod]),
-				cache.Indexers{})
+			retriever := mock.Get(mocks, NewMockRetriever[*corev1.PodList])
+			ctrl := controller.New[*corev1.Pod](
+				Config("get"), retriever, cache.Indexers{})
 			reflect.NewAccessor(reflect.NewAccessor(ctrl).Get("informer")).
 				Set("indexer", GetIndexer(mocks, param.indexer))
 
@@ -423,10 +433,9 @@ func TestControllerList(t *testing.T) {
 		Run(func(t test.Test, param controllerListParams) {
 			// Given
 			mocks := mock.NewMocks(t).Expect(param.setup)
-			ctrl := controller.New[*corev1.Pod](Config("list"),
-				mock.Get(mocks, NewMockRetriever[*corev1.Pod]),
-				cache.Indexers{},
-			)
+			retriever := mock.Get(mocks, NewMockRetriever[*corev1.PodList])
+			ctrl := controller.New[*corev1.Pod](
+				Config("list"), retriever, cache.Indexers{})
 			reflect.NewAccessor(reflect.NewAccessor(ctrl).Get("informer")).
 				Set("indexer", GetIndexer(mocks, param.indexer))
 
