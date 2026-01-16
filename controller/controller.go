@@ -7,7 +7,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/tkrop/go-kube/errors"
@@ -29,26 +28,6 @@ type Config struct {
 	// Retries is the number of times the controller will try to process an
 	// resource event before returning a real error.
 	Retries int
-}
-
-// Retriever is the retriever interface for the service handling a resource.
-type Retriever[T runtime.Object] interface {
-	// List retrieves the list of resources from the API server.
-	List(
-		ctx context.Context, options metav1.ListOptions,
-	) (runtime.Object, error)
-	// Watch starts watching for changes on the resources from the API server.
-	Watch(
-		ctx context.Context, options metav1.ListOptions,
-	) (watch.Interface, error)
-}
-
-// Handler is the handler interface for the service handling a resource.
-type Handler[T runtime.Object] interface {
-	// Handle knows how to handle resource events.
-	Handle(ctx context.Context, obj runtime.Object) error
-	// Notify is called to notify about errors during processing.
-	Notify(ctx context.Context, key string, err error)
 }
 
 // Controller is the interface for managing the controller and accessing
@@ -84,12 +63,16 @@ type controller[T runtime.Object] struct {
 
 // New creates a new controller for given retriever using given configuration
 // and indexers.
-func New[T runtime.Object](
-	config *Config, retriever Retriever[T], indexers cache.Indexers,
+func New[T runtime.Object, L runtime.Object](
+	config *Config, retriever Retriever[L], indexers cache.Indexers,
 ) Controller[T] {
 	var temp T
 	informer := cache.NewSharedIndexInformer(&cache.ListWatch{
-		ListWithContextFunc:  retriever.List,
+		ListWithContextFunc: func(
+			ctx context.Context, options metav1.ListOptions,
+		) (runtime.Object, error) {
+			return retriever.List(ctx, options)
+		},
 		WatchFuncWithContext: retriever.Watch,
 	}, temp, config.Sync, indexers)
 

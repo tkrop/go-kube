@@ -5,9 +5,9 @@ package controller
 //revive:disable:line-length-limit  // go:generate directives are long.
 
 //go:generate mockgen -package=controller_test -destination=mock_queue_test.go -source=queue.go Queue
-//go:generate mockgen -package=controller_test -destination=mock_controller_test.go -source=controller.go Retriever,Handler
+//go:generate mockgen -package=controller_test -destination=mock_retriever_test.go -source=retriever.go Retriever
+//go:generate mockgen -package=controller_test -destination=mock_handler_test.go -source=handler.go Handler
 //go:generate mockgen -package=controller_test -destination=mock_recorder_test.go -source=recorder.go Recorder
-//go:generate mockgen -package=controller_test -destination=mock_resource_test.go -source=resource.go Resource
 //go:generate mockgen -package=controller_test -destination=mock_runnable_test.go -source=runner.go Runnable
 //go:generate mockgen -package=controller_test -destination=mock_watcher_test.go -mock_names=Interface=MockWatcher k8s.io/apimachinery/pkg/watch Interface
 //go:generate mockgen -package=controller_test -destination=mock_indexer_test.go k8s.io/client-go/tools/cache Indexer
