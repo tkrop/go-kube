@@ -59,7 +59,7 @@ func CallQueueName(name string) mock.SetupFunc {
 func CallProcessorHandlerNotify(key string) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
-			Notify(ctx, key, gomock.Any())
+			Notify(gomock.Any(), key, gomock.Any())
 	}
 }
 
@@ -72,12 +72,30 @@ func CallRecorderDoneEvent(
 	}
 }
 
+func CallRecorderDoneEventAny(
+	name string, success bool,
+) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockRecorder).EXPECT().
+			DoneEvent(ctx, name, success, gomock.Any())
+	}
+}
+
 func CallHandlerHandle(
 	obj runtime.Object, err error,
 ) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
 			Handle(gomock.Any(), obj).Return(err)
+	}
+}
+
+func CallIndexerGetByKey(
+	key string, obj any, exists bool, err error,
+) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockIndexer).EXPECT().
+			GetByKey(key).Return(obj, exists, err)
 	}
 }
 
@@ -312,24 +330,28 @@ type runParams struct {
 
 var runTestCases = map[string]runParams{
 	"single-worker": {
-		setup: func(mocks *mock.Mocks) any {
-			mock.Get(mocks, NewMockQueue[string]).EXPECT().
-				Get(gomock.Any()).Return("", true).AnyTimes()
+		setup: mock.Chain(
+			CallProcessorHandlerNotify("starting processor"),
+			func(mocks *mock.Mocks) any {
+				mock.Get(mocks, NewMockQueue[string]).EXPECT().
+					Get(gomock.Any()).Return("", true).AnyTimes()
 
-			return mock.Get(mocks, NewMockQueue[string]).EXPECT().
-				ShutDown(gomock.Any())
-		},
+				return mock.Get(mocks, NewMockQueue[string]).EXPECT().
+					ShutDown(gomock.Any())
+			}),
 		workers: 1,
 	},
 
 	"multiple-workers": {
-		setup: func(mocks *mock.Mocks) any {
-			mock.Get(mocks, NewMockQueue[string]).EXPECT().
-				Get(gomock.Any()).Return("", true).AnyTimes()
+		setup: mock.Chain(
+			CallProcessorHandlerNotify("starting processor"),
+			func(mocks *mock.Mocks) any {
+				mock.Get(mocks, NewMockQueue[string]).EXPECT().
+					Get(gomock.Any()).Return("", true).AnyTimes()
 
-			return mock.Get(mocks, NewMockQueue[string]).EXPECT().
-				ShutDown(gomock.Any())
-		},
+				return mock.Get(mocks, NewMockQueue[string]).EXPECT().
+					ShutDown(gomock.Any())
+			}),
 		workers: 3,
 	},
 }
@@ -377,17 +399,12 @@ var processTestCases = map[string]processParams{
 	"success-with-recorder": {
 		setup: mock.Chain(
 			CallQueueGet("default/test-pod", false),
-			func(mocks *mock.Mocks) any {
-				pod := &corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      "test-pod",
-					},
-				}
-
-				return mock.Get(mocks, NewMockIndexer).EXPECT().
-					GetByKey("default/test-pod").Return(pod, true, nil)
-			},
+			CallIndexerGetByKey("default/test-pod", &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "test-pod",
+				},
+			}, true, nil),
 			CallHandlerHandle(&corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
@@ -395,10 +412,7 @@ var processTestCases = map[string]processParams{
 				},
 			}, nil),
 			CallQueueName("test-queue"),
-			func(mocks *mock.Mocks) any {
-				return mock.Get(mocks, NewMockRecorder).EXPECT().
-					DoneEvent(ctx, "test-queue", true, gomock.Any())
-			},
+			CallRecorderDoneEventAny("test-queue", true),
 			CallQueueGet("", true)),
 		withRecorder: true,
 		withQueue:    true,
@@ -407,17 +421,12 @@ var processTestCases = map[string]processParams{
 	"success-without-recorder": {
 		setup: mock.Chain(
 			CallQueueGet("default/test-pod", false),
-			func(mocks *mock.Mocks) any {
-				pod := &corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      "test-pod",
-					},
-				}
-
-				return mock.Get(mocks, NewMockIndexer).EXPECT().
-					GetByKey("default/test-pod").Return(pod, true, nil)
-			},
+			CallIndexerGetByKey("default/test-pod", &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "test-pod",
+				},
+			}, true, nil),
 			CallHandlerHandle(&corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
@@ -431,11 +440,8 @@ var processTestCases = map[string]processParams{
 	"indexer-get-error": {
 		setup: mock.Chain(
 			CallQueueGet("default/error-pod", false),
-			func(mocks *mock.Mocks) any {
-				return mock.Get(mocks, NewMockIndexer).EXPECT().
-					GetByKey("default/error-pod").
-					Return(nil, false, assert.AnError)
-			},
+			CallIndexerGetByKey("default/error-pod", nil, false,
+				assert.AnError),
 			CallProcessorHandlerNotify("default/error-pod"),
 			CallQueueGet("", true)),
 		withQueue: true,
@@ -444,10 +450,7 @@ var processTestCases = map[string]processParams{
 	"object-not-exists": {
 		setup: mock.Chain(
 			CallQueueGet("default/missing-pod", false),
-			func(mocks *mock.Mocks) any {
-				return mock.Get(mocks, NewMockIndexer).EXPECT().
-					GetByKey("default/missing-pod").Return(nil, false, nil)
-			},
+			CallIndexerGetByKey("default/missing-pod", nil, false, nil),
 			CallQueueGet("", true)),
 		withQueue: true,
 	},
@@ -455,11 +458,8 @@ var processTestCases = map[string]processParams{
 	"type-assertion-error": {
 		setup: mock.Chain(
 			CallQueueGet("default/invalid-type", false),
-			func(mocks *mock.Mocks) any {
-				return mock.Get(mocks, NewMockIndexer).EXPECT().
-					GetByKey("default/invalid-type").
-					Return("not-a-runtime-object", true, nil)
-			},
+			CallIndexerGetByKey("default/invalid-type",
+				"not-a-runtime-object", true, nil),
 			CallProcessorHandlerNotify("default/invalid-type"),
 			CallQueueGet("", true)),
 		withQueue: true,
@@ -468,17 +468,12 @@ var processTestCases = map[string]processParams{
 	"handler-error-with-requeue": {
 		setup: mock.Chain(
 			CallQueueGet("default/handler-error", false),
-			func(mocks *mock.Mocks) any {
-				pod := &corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      "handler-error",
-					},
-				}
-
-				return mock.Get(mocks, NewMockIndexer).EXPECT().
-					GetByKey("default/handler-error").Return(pod, true, nil)
-			},
+			CallIndexerGetByKey("default/handler-error", &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "handler-error",
+				},
+			}, true, nil),
 			CallHandlerHandle(&corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
@@ -487,10 +482,7 @@ var processTestCases = map[string]processParams{
 			}, assert.AnError),
 			CallQueueRequeue("default/handler-error", nil),
 			CallQueueName("test-queue"),
-			func(mocks *mock.Mocks) any {
-				return mock.Get(mocks, NewMockRecorder).EXPECT().
-					DoneEvent(ctx, "test-queue", false, gomock.Any())
-			},
+			CallRecorderDoneEventAny("test-queue", false),
 			CallQueueGet("", true)),
 		withRecorder: true,
 		withQueue:    true,
@@ -499,17 +491,12 @@ var processTestCases = map[string]processParams{
 	"handler-error-with-requeue-failure": {
 		setup: mock.Chain(
 			CallQueueGet("default/requeue-error", false),
-			func(mocks *mock.Mocks) any {
-				pod := &corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      "requeue-error",
-					},
-				}
-
-				return mock.Get(mocks, NewMockIndexer).EXPECT().
-					GetByKey("default/requeue-error").Return(pod, true, nil)
-			},
+			CallIndexerGetByKey("default/requeue-error", &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "requeue-error",
+				},
+			}, true, nil),
 			CallHandlerHandle(&corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
@@ -519,10 +506,7 @@ var processTestCases = map[string]processParams{
 			CallQueueRequeue("default/requeue-error", assert.AnError),
 			CallProcessorHandlerNotify("default/requeue-error"),
 			CallQueueName("test-queue"),
-			func(mocks *mock.Mocks) any {
-				return mock.Get(mocks, NewMockRecorder).EXPECT().
-					DoneEvent(ctx, "test-queue", false, gomock.Any())
-			},
+			CallRecorderDoneEventAny("test-queue", false),
 			CallQueueGet("", true)),
 		withRecorder: true,
 		withQueue:    true,

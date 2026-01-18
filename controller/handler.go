@@ -48,7 +48,13 @@ func (r *handler[T]) Handle(
 func (r *handler[T]) Notify(
 	_ context.Context, msg string, err error,
 ) {
-	log.WithError(err).WithFields(log.Fields{
-		"handler": r.base.Error(),
-	}).Error(msg)
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"handler": r.base.Error(),
+		}).Error(msg)
+	} else {
+		log.WithFields(log.Fields{
+			"handler": r.base.Error(),
+		}).Trace(msg)
+	}
 }
