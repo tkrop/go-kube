@@ -13,7 +13,7 @@ import (
 )
 
 // ErrController is an operator error.
-var ErrController = errors.NewError("controller")
+var ErrController = errors.New("controller")
 
 // Config is the controller configuration.
 type Config struct {

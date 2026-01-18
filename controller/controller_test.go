@@ -104,7 +104,7 @@ func CallHandlerNotifyAny() mock.SetupFunc {
 func TestResource(t *testing.T) {
 	client := fake.NewClientset()
 	ctrl := controller.New[*corev1.Pod](Config("add-handler"),
-		controller.NewRetriever(client.CoreV1().Pods(""), testError),
+		controller.NewRetriever(client.CoreV1().Pods(""), errTest),
 		cache.Indexers{})
 	assert.NotNil(t, ctrl)
 }
@@ -249,7 +249,7 @@ var controllerRunTestCases = map[string]controllerRunParams{
 			func(mocks *mock.Mocks) any {
 				return mock.Get(mocks, NewMockRetriever[*corev1.PodList]).EXPECT().
 					Watch(gomock.Any(), gomock.Any()).AnyTimes().
-					Return(nil, errors.NewError("watch not available"))
+					Return(nil, errors.New("watch not available"))
 			},
 		),
 		expect: controller.ErrController.New("running [name=%s]: %s",

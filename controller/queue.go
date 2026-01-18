@@ -13,7 +13,7 @@ import (
 
 var (
 	// ErrQueue is a generic queue error.
-	ErrQueue = errors.NewError("queue")
+	ErrQueue = errors.New("queue")
 	// ErrMaxRetries is returned when an item has reached the maximum number
 	// of retries.
 	ErrMaxRetries = ErrQueue.New("max retries")

@@ -23,7 +23,7 @@ var retrieverListTestCases = map[string]retrieverListParams{
 
 	"resource-error": {
 		setup: CallRetrieverList[*List](nil, assert.AnError),
-		error: testError.New("listing: %w", assert.AnError),
+		error: errTest.New("listing: %w", assert.AnError),
 	},
 }
 
@@ -33,7 +33,7 @@ func TestRetrieverList(t *testing.T) {
 			// Given
 			mocks := mock.NewMocks(t).Expect(param.setup)
 			resource := controller.NewRetriever(
-				mock.Get(mocks, NewMockRetriever[*List]), testError)
+				mock.Get(mocks, NewMockRetriever[*List]), errTest)
 
 			// When
 			result, err := resource.List(ctx, testOptions)
@@ -59,7 +59,7 @@ var retrieverWatchTestCases = map[string]retrieverWatchParams{
 	"resource-error": {
 		setup:  CallRetrieverWatch[*List](assert.AnError),
 		expect: NewMockWatcher,
-		error:  testError.New("watching: %w", assert.AnError),
+		error:  errTest.New("watching: %w", assert.AnError),
 	},
 }
 
@@ -69,7 +69,7 @@ func TestRetrieverWatch(t *testing.T) {
 			// Given
 			mocks := mock.NewMocks(t).Expect(param.setup)
 			resource := controller.NewRetriever(
-				mock.Get(mocks, NewMockRetriever[*List]), testError)
+				mock.Get(mocks, NewMockRetriever[*List]), errTest)
 			expect := mocks.GetMock(param.expect)
 
 			// When

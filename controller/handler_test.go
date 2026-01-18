@@ -15,12 +15,13 @@ import (
 	"github.com/tkrop/go-kube/errors"
 )
 
+// Error instance for testing.
+var errTest = errors.New("test")
+
 var (
-	//nolint:errname // is not an error variable.
-	testError   = errors.NewError("test")
+	testOptions = metav1.ListOptions{LabelSelector: "test=true"}
 	testObject  = &Object{ObjectMeta: metav1.ObjectMeta{Name: "test"}}
 	testList    = NewList(testObject)
-	testOptions = metav1.ListOptions{LabelSelector: "test=true"}
 )
 
 func GetNilResourceFunc() func(
@@ -80,7 +81,7 @@ var handlerHandleTestCases = map[string]handlerHandleParams{
 	"invalid-type": {
 		obj:    &Object{ObjectMeta: metav1.ObjectMeta{Name: "wrong"}},
 		handle: GetHandleNoop(),
-		error: testError.New("invalid type [type=%T]",
+		error: errTest.New("invalid type [type=%T]",
 			&Object{ObjectMeta: metav1.ObjectMeta{Name: "wrong"}}),
 	},
 }
@@ -90,7 +91,7 @@ func TestHandlerHandle(t *testing.T) {
 		Run(func(t test.Test, param handlerHandleParams) {
 			// Given
 			mock.NewMocks(t).Expect(param.setup)
-			handler := controller.NewHandler(param.handle, testError)
+			handler := controller.NewHandler(param.handle, errTest)
 
 			// When
 			err := handler.Handle(ctx, param.obj)
@@ -118,7 +119,7 @@ var handlerNotifyTestCases = map[string]handlerNotifyParams{
 
 	"with-wrapped-error": {
 		msg:   "complex error scenario",
-		error: testError.New("wrapped error: %w", assert.AnError),
+		error: errTest.New("wrapped error: %w", assert.AnError),
 	},
 }
 
@@ -126,7 +127,7 @@ func TestHandlerNotify(t *testing.T) {
 	test.Map(t, handlerNotifyTestCases).
 		Run(func(_ test.Test, param handlerNotifyParams) {
 			// Given
-			handler := controller.NewHandler(GetHandleNoop(), testError)
+			handler := controller.NewHandler(GetHandleNoop(), errTest)
 
 			// When
 			handler.Notify(ctx, param.msg, param.error)

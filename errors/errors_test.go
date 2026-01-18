@@ -19,38 +19,38 @@ type errorParams struct {
 
 var errorTestCases = map[string]errorParams{
 	"unwrap": {call: func(t test.Test, base error) {
-		assert.Equal(t, base, errors.New(base).Unwrap())
+		assert.Equal(t, base, errors.Wrap(base).Unwrap())
 	}},
 	"is-true": {call: func(t test.Test, base error) {
-		assert.True(t, errors.New(base).Is(base))
+		assert.True(t, errors.Wrap(base).Is(base))
 	}},
 	"is-false": {call: func(t test.Test, base error) {
-		assert.False(t, errors.New(base).Is(errors.NewError("other")))
+		assert.False(t, errors.Wrap(base).Is(errors.New("other")))
 	}},
 	"as-true": {call: func(t test.Test, base error) {
-		assert.True(t, errors.New(base).As(new(error)))
+		assert.True(t, errors.Wrap(base).As(new(error)))
 	}},
 	"as-false": {call: func(t test.Test, base error) {
-		assert.False(t, errors.New(base).As(new(notError)))
+		assert.False(t, errors.Wrap(base).As(new(notError)))
 	}},
 	"error-string": {call: func(t test.Test, base error) {
-		assert.Equal(t, "base", errors.New(base).Error())
+		assert.Equal(t, "base", errors.Wrap(base).Error())
 	}},
 	"string-string": {call: func(t test.Test, base error) {
-		assert.Equal(t, "base", errors.New(base).String())
+		assert.Equal(t, "base", errors.Wrap(base).String())
 	}},
 	"new-method": {call: func(t test.Test, base error) {
-		err := errors.New(base).New("extra [%s]", "info")
+		err := errors.Wrap(base).New("extra [%s]", "info")
 		assert.Error(t, err)
 		assert.Equal(t, err.Error(), "base - extra [info]")
 	}},
 	"wrap-nil": {call: func(t test.Test, base error) {
-		err := errors.New(base).Wrap("not wrap", "arg", nil)
+		err := errors.Wrap(base).Wrap("not wrap", "arg", nil)
 		assert.Nil(t, err)
 	}},
 	"wrap-error": {call: func(t test.Test, base error) {
-		err := errors.New(base).Wrap("wrap [%s]: %w", "arg",
-			errors.NewError("wrapped"))
+		err := errors.Wrap(base).Wrap("wrap [%s]: %w", "arg",
+			errors.New("wrapped"))
 		assert.Error(t, err)
 		assert.Equal(t, err.Error(), "base - wrap [arg]: wrapped")
 	}},
@@ -60,7 +60,7 @@ func TestErrorMethods(t *testing.T) {
 	test.Map(t, errorTestCases).
 		Run(func(t test.Test, param errorParams) {
 			// Given
-			base := errors.NewError("base")
+			base := errors.New("base")
 
 			// When & Then
 			param.call(t, base)
