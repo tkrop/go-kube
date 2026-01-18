@@ -83,6 +83,7 @@ func NewProcessor[T runtime.Object](
 // Run will start the processing loop.
 func (p *Processor[T]) Run(ctx context.Context) {
 	defer p.queue.ShutDown(ctx)
+	p.handler.Notify(ctx, "starting processor", nil)
 
 	for range p.workers {
 		go func() {
