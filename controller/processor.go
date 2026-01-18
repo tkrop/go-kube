@@ -90,6 +90,9 @@ func (p *Processor[T]) Run(ctx context.Context) {
 			wait.Until(p.Process, time.Second, ctx.Done())
 		}()
 	}
+
+	<-ctx.Done()
+	p.handler.Notify(ctx, "stopping processor", nil)
 }
 
 // Process will start a processing loop on event queue.
