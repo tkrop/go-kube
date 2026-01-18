@@ -332,26 +332,22 @@ var runTestCases = map[string]runParams{
 	"single-worker": {
 		setup: mock.Chain(
 			CallProcessorHandlerNotify("starting processor"),
-			func(mocks *mock.Mocks) any {
-				mock.Get(mocks, NewMockQueue[string]).EXPECT().
-					Get(gomock.Any()).Return("", true).AnyTimes()
-
-				return mock.Get(mocks, NewMockQueue[string]).EXPECT().
-					ShutDown(gomock.Any())
-			}),
+			CallQueueGet("worker-1", true),
+			CallProcessorHandlerNotify("stopping processor"),
+			CallQueueShutDown(),
+		),
 		workers: 1,
 	},
 
 	"multiple-workers": {
 		setup: mock.Chain(
 			CallProcessorHandlerNotify("starting processor"),
-			func(mocks *mock.Mocks) any {
-				mock.Get(mocks, NewMockQueue[string]).EXPECT().
-					Get(gomock.Any()).Return("", true).AnyTimes()
-
-				return mock.Get(mocks, NewMockQueue[string]).EXPECT().
-					ShutDown(gomock.Any())
-			}),
+			CallQueueGet("worker-1", true),
+			CallQueueGet("worker-2", true),
+			CallQueueGet("worker-3", true),
+			CallProcessorHandlerNotify("stopping processor"),
+			CallQueueShutDown(),
+		),
 		workers: 3,
 	},
 }
