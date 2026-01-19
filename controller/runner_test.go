@@ -40,15 +40,34 @@ import (
 //
 // This represents architectural dead code that provides defensive error
 // handling for future API changes.
-func CallMockRun(err error) mock.SetupFunc {
+
+// CallMockInit sets up the mock for the Init method.
+
+func CallMockInit(err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockRunnable).EXPECT().
-			Run(gomock.Not(gomock.Nil()), gomock.Not(gomock.Nil())).
-			DoAndReturn(func(_ context.Context, errch chan error) {
+			Init(gomock.Not(gomock.Nil()), gomock.Not(gomock.Nil())).
+			Do(func(_ context.Context, errch chan error) {
 				if err != nil {
 					errch <- err
 				}
 			})
+	}
+}
+
+// CallMockRun sets up the mock for the Run method.
+func CallMockRun() mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockRunnable).EXPECT().
+			Run(gomock.Not(gomock.Nil()))
+	}
+}
+
+// CallMockRunOpt sets up the mock for the Run method.
+func CallMockRunOpt() mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockRunnable).EXPECT().
+			Run(gomock.Not(gomock.Nil())).MaxTimes(1)
 	}
 }
 
@@ -94,17 +113,24 @@ var defaultRunnerRunTestCases = map[string]defaultRunnerRunParams{
 		runnables: 0,
 	},
 	"single": {
-		setup:     CallMockRun(nil),
+		setup: mock.Chain(
+			CallMockInit(nil),
+			CallMockRun(),
+		),
 		runnables: 1,
 	},
 	"multiple": {
-		setup: mock.Setup(
-			CallMockRun(nil), CallMockRun(nil), CallMockRun(nil),
+		setup: mock.Chain(
+			CallMockInit(nil), CallMockInit(nil), CallMockInit(nil),
+			CallMockRun(), CallMockRun(), CallMockRun(),
 		),
 		runnables: 3,
 	},
 	"error": {
-		setup:     CallMockRun(assert.AnError),
+		setup: mock.Chain(
+			CallMockInit(assert.AnError),
+			CallMockRunOpt(),
+		),
 		runnables: 1,
 		expect:    assert.AnError,
 	},
@@ -197,7 +223,8 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
-			CallMockRun(assert.AnError),
+			CallMockInit(assert.AnError),
+			CallMockRunOpt(),
 		),
 		config: defaultLeaderConfig,
 		id:     "host-1", runnables: 1,
@@ -217,7 +244,8 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
-			CallMockRun(nil),
+			CallMockInit(nil),
+			CallMockRunOpt(),
 		),
 		config: defaultLeaderConfig,
 		id:     "host-1", runnables: 1,
@@ -227,7 +255,8 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
-			CallMockRun(nil), CallMockRun(nil), CallMockRun(nil),
+			CallMockInit(nil), CallMockInit(nil), CallMockInit(nil),
+			CallMockRun(), CallMockRun(), CallMockRun(),
 		),
 		config: defaultLeaderConfig,
 		id:     "host-1", runnables: 3,
@@ -237,7 +266,8 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
-			CallMockRun(nil),
+			CallMockInit(nil),
+			CallMockRun(),
 		),
 		config: &controller.LeaderConfig{
 			LeaseDuration: 15 * time.Millisecond,
@@ -271,7 +301,8 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 		setup: mock.Chain(
 			CallK8sClientCoreV1(true),
 			CallK8sClientCoordinationV1(),
-			CallMockRun(nil),
+			CallMockInit(nil),
+			CallMockRun(),
 		),
 		config: defaultLeaderConfig,
 		id:     "host-cancel-2", runnables: 1,

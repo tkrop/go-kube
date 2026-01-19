@@ -168,7 +168,8 @@ var controllerAddHandlerTestCases = map[string]controllerAddHandlerParams{
 		before: func(ctrl controller.Controller[*corev1.Pod]) {
 			ctx, cancel := context.WithCancel(context.Background())
 			sigerr := make(chan error, 1)
-			go ctrl.Run(ctx, sigerr)
+			ctrl.Init(ctx, sigerr)
+			go ctrl.Run(ctx)
 			time.Sleep(100 * time.Millisecond)
 			cancel()
 			// Wait with timeout for controller to shut down
@@ -303,7 +304,8 @@ func TestControllerRun(t *testing.T) {
 			defer cancel()
 
 			// When
-			go ctrl.Run(ctx, sigerr)
+			ctrl.Init(ctx, sigerr)
+			go ctrl.Run(ctx)
 
 			// Then
 			timeout := 100 * time.Millisecond
