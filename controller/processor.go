@@ -150,6 +150,11 @@ func (p *Processor[T]) process(ctx context.Context) bool {
 
 // recover recovers from panics during processing and notifies the handler
 // about the panic error. Needs to be called using defer.
+//
+// TODO: check whether this recovery is suitable in all panic cases or whether
+// this behavior should be configurable to alternatively kill the operator. The
+// previous behavior to just stop the processor loop for one after another
+// worker is probably the least desirable behavior.
 func (p *Processor[T]) recover(ctx context.Context, key string) {
 	// revive:disable-next-line:defer // helper function called with defer.
 	if err := recover(); err != nil {
