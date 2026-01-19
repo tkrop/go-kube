@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,10 +34,41 @@ type LeaderConfig struct {
 	RenewPeriod time.Duration `default:"2s"`
 }
 
+// Runnable is the interface for controller runnables that can be first
+// initialized and than started.
 type Runnable interface {
-	// Run runs the runnable using the given context and error channel for
-	// reporting errors.
-	Run(ctx context.Context, errch chan error)
+	// Init initializes the controller runnable by starting the informer and
+	// waiting until the cache is synced. This allows to coordinate multiple
+	// controllers by initializing all controllers before running their
+	// processors.
+	Init(ctx context.Context, errch chan error)
+	// Run starts the controller runnable by creating the workers that are
+	// running the actual event processing.
+	Run(ctx context.Context)
+}
+
+// runner creates a new run function that can be used to run multiple
+// runnables. The runnables are first initialized in parallel, and once all are
+// initialized, they are started in parallel.
+func runner(
+	errch chan error, runnables ...Runnable,
+) func(ctx context.Context) {
+	return func(ctx context.Context) {
+		wg := sync.WaitGroup{}
+
+		wg.Add(len(runnables))
+		for _, runnable := range runnables {
+			go func(runnable Runnable) {
+				runnable.Init(ctx, errch)
+				wg.Done()
+			}(runnable)
+		}
+		wg.Wait()
+
+		for _, runnable := range runnables {
+			go runnable.Run(ctx)
+		}
+	}
 }
 
 // Runner knows how to run the processing queue.
@@ -59,9 +91,7 @@ func NewDefaultRunner() Runner {
 func (*DefaultRunner) Run(
 	ctx context.Context, errch chan error, runnables ...Runnable,
 ) {
-	for _, run := range runnables {
-		go run.Run(ctx, errch)
-	}
+	runner(errch, runnables...)(ctx)
 }
 
 // LeaderRunner is the leader election default implementation.
@@ -119,11 +149,7 @@ func (r *LeaderRunner) Run(
 		RenewDeadline: r.config.RenewDeadline,
 		RetryPeriod:   r.config.RenewPeriod,
 		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: func(ctx context.Context) {
-				for _, runnable := range runnables {
-					go runnable.Run(ctx, errch)
-				}
-			},
+			OnStartedLeading: runner(errch, runnables...),
 			OnStoppedLeading: func() {
 				errch <- ErrController.New("running [name=%s]: %w",
 					r.config.Name, errors.New("leadership lost"))
