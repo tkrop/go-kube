@@ -19,19 +19,19 @@ import (
 	"github.com/tkrop/go-kube/controller"
 )
 
-// TODO: this is an AI generated test that needs to be reviewed and improved.
-
-func CallQueueAdd(key string) mock.SetupFunc {
-	return func(mocks *mock.Mocks) any {
-		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
-			Add(gomock.Any(), key)
+func pod(name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      name,
+		},
 	}
 }
 
-func CallQueueShutDown() mock.SetupFunc {
+func CallQueueName(name string) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
-			ShutDown(gomock.Any())
+			Name().Return(name)
 	}
 }
 
@@ -42,6 +42,13 @@ func CallQueueGet(key string, shutdown bool) mock.SetupFunc {
 	}
 }
 
+func CallQueueAdd(key string) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
+			Add(gomock.Any(), key)
+	}
+}
+
 func CallQueueRequeue(key string, err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
@@ -49,10 +56,17 @@ func CallQueueRequeue(key string, err error) mock.SetupFunc {
 	}
 }
 
-func CallQueueName(name string) mock.SetupFunc {
+func CallQueueDone(key string) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
-			Name().Return(name)
+			Done(gomock.Any(), key)
+	}
+}
+
+func CallQueueShutDown() mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
+			ShutDown(gomock.Any())
 	}
 }
 
@@ -87,6 +101,18 @@ func CallHandlerHandle(
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
 			Handle(gomock.Any(), obj).Return(err)
+	}
+}
+
+func CallHandlerHandlePanic(
+	obj runtime.Object, msg string,
+) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
+			Handle(gomock.Any(), obj).
+			Do(func(context.Context, runtime.Object) {
+				panic(msg)
+			})
 	}
 }
 
@@ -137,13 +163,8 @@ type onAddParams struct {
 
 var onAddTestCases = map[string]onAddParams{
 	"valid-object": {
-		setup: mock.Chain(CallQueueAdd("default/test-pod")),
-		obj: &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "default",
-				Name:      "test-pod",
-			},
-		},
+		setup:  mock.Chain(CallQueueAdd("default/test-pod")),
+		obj:    pod("test-pod"),
 		isInit: false,
 	},
 
@@ -154,13 +175,8 @@ var onAddTestCases = map[string]onAddParams{
 	},
 
 	"valid-object-initial-add": {
-		setup: mock.Chain(CallQueueAdd("default/init-pod")),
-		obj: &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "default",
-				Name:      "init-pod",
-			},
-		},
+		setup:  mock.Chain(CallQueueAdd("default/init-pod")),
+		obj:    pod("init-pod"),
 		isInit: true,
 	},
 }
@@ -177,8 +193,6 @@ func TestOnAdd(t *testing.T) {
 
 			// When
 			eventHandler.OnAdd(param.obj, param.isInit)
-
-			// Then
 		})
 }
 
@@ -190,29 +204,14 @@ type onUpdateParams struct {
 
 var onUpdateTestCases = map[string]onUpdateParams{
 	"valid-update": {
-		setup: mock.Chain(CallQueueAdd("default/updated-pod")),
-		oldObj: &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "default",
-				Name:      "updated-pod",
-			},
-		},
-		newObj: &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "default",
-				Name:      "updated-pod",
-			},
-		},
+		setup:  mock.Chain(CallQueueAdd("default/updated-pod")),
+		oldObj: pod("updated-pod"),
+		newObj: pod("updated-pod"),
 	},
 
 	"invalid-new-object": {
-		setup: mock.Chain(CallProcessorHandlerNotify("")),
-		oldObj: &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "default",
-				Name:      "old-pod",
-			},
-		},
+		setup:  mock.Chain(CallProcessorHandlerNotify("")),
+		oldObj: pod("old-pod"),
 		newObj: "invalid",
 	},
 }
@@ -229,8 +228,6 @@ func TestOnUpdate(t *testing.T) {
 
 			// When
 			eventHandler.OnUpdate(param.oldObj, param.newObj)
-
-			// Then
 		})
 }
 
@@ -242,24 +239,14 @@ type onDeleteParams struct {
 var onDeleteTestCases = map[string]onDeleteParams{
 	"valid-delete": {
 		setup: mock.Chain(CallQueueAdd("default/deleted-pod")),
-		obj: &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "default",
-				Name:      "deleted-pod",
-			},
-		},
+		obj:   pod("deleted-pod"),
 	},
 
 	"delete-with-tombstone": {
 		setup: mock.Chain(CallQueueAdd("default/tombstone-pod")),
 		obj: cache.DeletedFinalStateUnknown{
 			Key: "default/tombstone-pod",
-			Obj: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "tombstone-pod",
-				},
-			},
+			Obj: pod("tombstone-pod"),
 		},
 	},
 
@@ -374,8 +361,6 @@ func TestRun(t *testing.T) {
 
 			// When
 			processor.Run(ctx)
-
-			// Then
 		})
 }
 
@@ -395,20 +380,11 @@ var processTestCases = map[string]processParams{
 	"success-with-recorder": {
 		setup: mock.Chain(
 			CallQueueGet("default/test-pod", false),
-			CallIndexerGetByKey("default/test-pod", &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "test-pod",
-				},
-			}, true, nil),
-			CallHandlerHandle(&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "test-pod",
-				},
-			}, nil),
+			CallIndexerGetByKey("default/test-pod", pod("test-pod"), true, nil),
+			CallHandlerHandle(pod("test-pod"), nil),
 			CallQueueName("test-queue"),
 			CallRecorderDoneEventAny("test-queue", true),
+			CallQueueDone("default/test-pod"),
 			CallQueueGet("", true)),
 		withRecorder: true,
 		withQueue:    true,
@@ -417,18 +393,9 @@ var processTestCases = map[string]processParams{
 	"success-without-recorder": {
 		setup: mock.Chain(
 			CallQueueGet("default/test-pod", false),
-			CallIndexerGetByKey("default/test-pod", &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "test-pod",
-				},
-			}, true, nil),
-			CallHandlerHandle(&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "test-pod",
-				},
-			}, nil),
+			CallIndexerGetByKey("default/test-pod", pod("test-pod"), true, nil),
+			CallHandlerHandle(pod("test-pod"), nil),
+			CallQueueDone("default/test-pod"),
 			CallQueueGet("", true)),
 		withQueue: true,
 	},
@@ -439,6 +406,7 @@ var processTestCases = map[string]processParams{
 			CallIndexerGetByKey("default/error-pod", nil, false,
 				assert.AnError),
 			CallProcessorHandlerNotify("default/error-pod"),
+			CallQueueDone("default/error-pod"),
 			CallQueueGet("", true)),
 		withQueue: true,
 	},
@@ -447,6 +415,7 @@ var processTestCases = map[string]processParams{
 		setup: mock.Chain(
 			CallQueueGet("default/missing-pod", false),
 			CallIndexerGetByKey("default/missing-pod", nil, false, nil),
+			CallQueueDone("default/missing-pod"),
 			CallQueueGet("", true)),
 		withQueue: true,
 	},
@@ -457,6 +426,7 @@ var processTestCases = map[string]processParams{
 			CallIndexerGetByKey("default/invalid-type",
 				"not-a-runtime-object", true, nil),
 			CallProcessorHandlerNotify("default/invalid-type"),
+			CallQueueDone("default/invalid-type"),
 			CallQueueGet("", true)),
 		withQueue: true,
 	},
@@ -464,21 +434,13 @@ var processTestCases = map[string]processParams{
 	"handler-error-with-requeue": {
 		setup: mock.Chain(
 			CallQueueGet("default/handler-error", false),
-			CallIndexerGetByKey("default/handler-error", &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "handler-error",
-				},
-			}, true, nil),
-			CallHandlerHandle(&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "handler-error",
-				},
-			}, assert.AnError),
+			CallIndexerGetByKey("default/handler-error",
+				pod("handler-error"), true, nil),
+			CallHandlerHandle(pod("handler-error"), assert.AnError),
 			CallQueueRequeue("default/handler-error", nil),
 			CallQueueName("test-queue"),
 			CallRecorderDoneEventAny("test-queue", false),
+			CallQueueDone("default/handler-error"),
 			CallQueueGet("", true)),
 		withRecorder: true,
 		withQueue:    true,
@@ -487,25 +449,29 @@ var processTestCases = map[string]processParams{
 	"handler-error-with-requeue-failure": {
 		setup: mock.Chain(
 			CallQueueGet("default/requeue-error", false),
-			CallIndexerGetByKey("default/requeue-error", &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "requeue-error",
-				},
-			}, true, nil),
-			CallHandlerHandle(&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "requeue-error",
-				},
-			}, assert.AnError),
+			CallIndexerGetByKey("default/requeue-error",
+				pod("requeue-error"), true, nil),
+			CallHandlerHandle(pod("requeue-error"), assert.AnError),
 			CallQueueRequeue("default/requeue-error", assert.AnError),
 			CallProcessorHandlerNotify("default/requeue-error"),
 			CallQueueName("test-queue"),
 			CallRecorderDoneEventAny("test-queue", false),
+			CallQueueDone("default/requeue-error"),
 			CallQueueGet("", true)),
 		withRecorder: true,
 		withQueue:    true,
+	},
+
+	"handler-panic-recovery": {
+		setup: mock.Chain(
+			CallQueueGet("default/panic-pod", false),
+			CallIndexerGetByKey("default/panic-pod", pod("panic-pod"),
+				true, nil),
+			CallHandlerHandlePanic(pod("panic-pod"), "handler panic"),
+			CallProcessorHandlerNotify("default/panic-pod"),
+			CallQueueDone("default/panic-pod"),
+			CallQueueGet("", true)),
+		withQueue: true,
 	},
 }
 
@@ -535,8 +501,6 @@ func TestProcess(t *testing.T) {
 			}
 
 			// When
-			processor.Process()
-
-			// Then
+			processor.Process(ctx)
 		})
 }

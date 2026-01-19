@@ -86,51 +86,73 @@ func (p *Processor[T]) Run(ctx context.Context) {
 	p.handler.Notify(ctx, "starting processor", nil)
 
 	for range p.workers {
-		go func() {
-			wait.Until(p.Process, time.Second, ctx.Done())
-		}()
+		go wait.Until(func() {
+			p.Process(ctx)
+		}, time.Second, ctx.Done())
 	}
 
 	<-ctx.Done()
 	p.handler.Notify(ctx, "stopping processor", nil)
 }
 
-// Process will start a processing loop on event queue.
-func (p *Processor[T]) Process() {
-	var start time.Time
-	ctx := context.Background()
-
+// Process will start a processing loop on event queue. The loop will run until
+// the given context is done or the queue is shutdown.
+func (p *Processor[T]) Process(ctx context.Context) {
 	for {
-		key, exit := p.queue.Get(ctx)
-		if exit {
+		if p.process(ctx) {
 			return
 		}
+	}
+}
 
-		if p.recorder != nil {
-			start = time.Now()
-		}
+// process processes a single item from the queue. It returns true if the
+// processing loop should exit. If the event handling fails or panics, the
+// error is reported to the handler and the item is requeued for retry.
+func (p *Processor[T]) process(ctx context.Context) bool {
+	var start time.Time
+	if p.recorder != nil {
+		start = time.Now()
+	}
 
-		obj, exists, err := p.indexer.GetByKey(key)
-		if err != nil {
-			p.handler.Notify(ctx, key, err)
+	key, exit := p.queue.Get(ctx)
+	if exit {
+		return true
+	}
+	defer p.queue.Done(ctx, key)
 
-			continue
-		} else if !exists {
-			continue
-		}
+	obj, exists, err := p.indexer.GetByKey(key)
+	if err != nil {
+		p.handler.Notify(ctx, key, err)
 
-		if o, ok := obj.(runtime.Object); !ok {
+		return false
+	} else if !exists {
+		return false
+	}
+
+	defer p.recover(ctx, key)
+
+	if o, ok := obj.(runtime.Object); !ok {
+		p.handler.Notify(ctx, key,
+			ErrController.New("type assertion: %T", obj))
+	} else if err = p.handler.Handle(ctx, o); err != nil {
+		if rerr := p.queue.Requeue(ctx, key); rerr != nil {
 			p.handler.Notify(ctx, key,
-				ErrController.New("type assertion: %T", obj))
-		} else if err = p.handler.Handle(ctx, o); err != nil {
-			if rerr := p.queue.Requeue(ctx, key); rerr != nil {
-				p.handler.Notify(ctx, key,
-					ErrController.New("could not retry: %s: %w", rerr, err))
-			}
+				ErrController.New("could not retry: %s: %w", rerr, err))
 		}
+	}
 
-		if p.recorder != nil {
-			p.recorder.DoneEvent(ctx, p.queue.Name(), err == nil, start)
-		}
+	if p.recorder != nil {
+		p.recorder.DoneEvent(ctx, p.queue.Name(), err == nil, start)
+	}
+
+	return false
+}
+
+// recover recovers from panics during processing and notifies the handler
+// about the panic error. Needs to be called using defer.
+func (p *Processor[T]) recover(ctx context.Context, key string) {
+	// revive:disable-next-line:defer // helper function called with defer.
+	if err := recover(); err != nil {
+		p.handler.Notify(ctx, key, ErrController.New("panic: %v", err))
 	}
 }
