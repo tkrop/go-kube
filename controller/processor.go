@@ -4,10 +4,14 @@ import (
 	"context"
 	"time"
 
+	"github.com/tkrop/go-kube/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
 )
+
+// ErrPanic is returned when a panic occurs during event processing.
+var ErrPanic = errors.New("panic")
 
 // ResourceEventHandler is an event handler for handling resource events.
 type ResourceEventHandler[T runtime.Object] struct {
@@ -149,7 +153,9 @@ func (p *Processor[T]) process(ctx context.Context) bool {
 }
 
 // recover recovers from panics during processing and notifies the handler
-// about the panic error. Needs to be called using defer.
+// about the panic error. Needs to be called using defer. If a panic occurs,
+// the handler is notified with `ErrPanic` wrapped around the panic value. This
+// allows the handler to log the panic and continue processing further events.
 //
 // TODO: check whether this recovery is suitable in all panic cases or whether
 // this behavior should be configurable to alternatively kill the operator. The
@@ -158,6 +164,6 @@ func (p *Processor[T]) process(ctx context.Context) bool {
 func (p *Processor[T]) recover(ctx context.Context, key string) {
 	// revive:disable-next-line:defer // helper function called with defer.
 	if err := recover(); err != nil {
-		p.handler.Notify(ctx, key, ErrController.New("panic: %v", err))
+		p.handler.Notify(ctx, key, ErrPanic.New(": %w", err))
 	}
 }
