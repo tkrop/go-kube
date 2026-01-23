@@ -15,6 +15,7 @@ import (
 
 	"go.uber.org/mock/gomock"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/tkrop/go-testing/mock"
 	"github.com/tkrop/go-testing/reflect"
@@ -434,6 +435,7 @@ func TestControllerList(t *testing.T) {
 	test.Map(t, controllerListTestCases).
 		Run(func(t test.Test, param controllerListParams) {
 			// Given
+			log.SetLevel(log.TraceLevel)
 			mocks := mock.NewMocks(t).Expect(param.setup)
 			retriever := mock.Get(mocks, NewMockRetriever[*corev1.PodList])
 			ctrl := controller.New[*corev1.Pod](
@@ -446,5 +448,8 @@ func TestControllerList(t *testing.T) {
 
 			// Then
 			assert.ElementsMatch(t, param.expect, result)
+		}).
+		Cleanup(func() {
+			log.SetLevel(log.InfoLevel)
 		})
 }

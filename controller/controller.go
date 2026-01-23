@@ -161,12 +161,14 @@ func (c *controller[T]) List(namespace, name string, uid types.UID) []T {
 		}
 	}
 
-	log.WithFields(log.Fields{
-		"namespace": namespace,
-		"name":      name,
-		"uid":       uid,
-		"results":   len(results),
-	}).Debugf("listing %s", c.config.Name)
+	if log.IsLevelEnabled(log.TraceLevel) {
+		log.WithFields(log.Fields{
+			"namespace": namespace,
+			"name":      name,
+			"uid":       uid,
+			"results":   len(results),
+		}).Tracef("listing %s", c.config.Name)
+	}
 
 	return results
 }

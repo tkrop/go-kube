@@ -97,6 +97,7 @@ func CallK8sClientCoordinationV1() mock.SetupFunc {
 var defaultLeaderConfig = &controller.LeaderConfig{
 	Name:          "controller",
 	Namespace:     "default",
+	LockType:      "leases",
 	LeaseDuration: 100 * time.Millisecond,
 	RenewDeadline: 80 * time.Millisecond,
 	RenewPeriod:   20 * time.Millisecond,
@@ -198,6 +199,24 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 			test.Panic("runtime error: "+
 				"invalid memory address or nil pointer dereference"),
 		),
+	},
+
+	"lock-type-config-error": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		config: &controller.LeaderConfig{
+			Name:      "controller",
+			Namespace: "default",
+			LockType:  "invalid-type",
+		},
+		id: "host-1",
+		expect: controller.ErrController.Wrap(
+			"creating lock [name=%s]: %w", "controller",
+			//lint:ignore ST1005 // matching Kubernetes error message.
+			//nolint:staticcheck // matching Kubernetes error message.
+			errors.New("Invalid lock-type invalid-type")),
 	},
 
 	"elector-config-error": {
@@ -337,6 +356,35 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 			defer cancel()
 			runner.Run(timeoutCtx, errch, runnables...)
 			time.Sleep(100 * time.Millisecond)
+		},
+		expect: controller.ErrController.New("running [name=%s]: %w",
+			"controller", errors.New("leadership lost")),
+	},
+
+	"leadership-lost": {
+		setup: mock.Chain(
+			CallK8sClientCoreV1(true),
+			CallK8sClientCoordinationV1(),
+		),
+		config: &controller.LeaderConfig{
+			Name:          "controller",
+			Namespace:     "default",
+			LeaseDuration: 30 * time.Millisecond,
+			RenewDeadline: 20 * time.Millisecond,
+			RenewPeriod:   5 * time.Millisecond,
+		},
+		id:        "host-lost",
+		runnables: 0,
+		call: func(
+			runner controller.Runner,
+			runnables []controller.Runnable,
+			errch chan error,
+		) {
+			cancelCtx, cancel := context.WithCancel(ctx)
+			runner.Run(cancelCtx, errch, runnables...)
+			time.Sleep(80 * time.Millisecond)
+			cancel()
+			time.Sleep(20 * time.Millisecond)
 		},
 		expect: controller.ErrController.New("running [name=%s]: %w",
 			"controller", errors.New("leadership lost")),
