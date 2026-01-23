@@ -21,6 +21,9 @@ type LeaderConfig struct {
 	Name string `default:"controller"`
 	// Namespace is the namespace of the resource lock.
 	Namespace string `default:"default"`
+	// LockType is the type of resource lock to use. Supported types are
+	// "endpoints", "configmaps", and "leases".
+	LockType string `default:"leases"`
 
 	// LeaseDuration is the duration that non-leader candidates will
 	// wait to force acquire leadership. This is measured against time of
@@ -112,6 +115,11 @@ type LeaderRunner struct {
 func NewLeaderRunner(
 	id string, config *LeaderConfig, k8scli kubernetes.Interface,
 ) Runner {
+	// TODO: check whether we can improve go-config.
+	if config != nil && config.LockType == "" {
+		config.LockType = "leases"
+	}
+
 	return &LeaderRunner{
 		id:     id,
 		config: config,
@@ -125,9 +133,10 @@ func (r *LeaderRunner) Run(
 	ctx context.Context, errch chan error, runnables ...Runnable,
 ) {
 	// Create the resource lock.
-	lock, err := resourcelock.New(resourcelock.LeasesResourceLock,
-		r.config.Namespace, r.config.Name, r.k8scli.CoreV1(),
-		r.k8scli.CoordinationV1(), resourcelock.ResourceLockConfig{
+	lock, err := resourcelock.New(
+		r.config.LockType, r.config.Namespace, r.config.Name,
+		r.k8scli.CoreV1(), r.k8scli.CoordinationV1(),
+		resourcelock.ResourceLockConfig{
 			Identity: r.id,
 			EventRecorder: record.NewBroadcaster().
 				NewRecorder(scheme.Scheme, corev1.EventSource{
