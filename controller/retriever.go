@@ -21,8 +21,10 @@ type Retriever[T runtime.Object] interface {
 
 // retriever is the implementation of the retriever interface.
 type retriever[L runtime.Object] struct {
+	// The underlying retriever interface.
 	iface Retriever[L]
-	base  *errors.Error
+	// The base error for wrapping errors.
+	base *errors.Error
 }
 
 // NewRetriever creates a new retriever adapter for given retriever interface.

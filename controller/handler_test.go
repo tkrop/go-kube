@@ -121,6 +121,11 @@ var handlerNotifyTestCases = map[string]handlerNotifyParams{
 		msg:   "complex error scenario",
 		error: errTest.New("wrapped error: %w", assert.AnError),
 	},
+
+	"with-panic-error": {
+		msg:   "panic occurred",
+		error: controller.ErrPanic.New("test panic: %w", assert.AnError),
+	},
 }
 
 func TestHandlerNotify(t *testing.T) {

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"runtime/debug"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tkrop/go-kube/errors"
@@ -12,7 +13,9 @@ import (
 type Handler[T runtime.Object] interface {
 	// Handle knows how to handle resource events.
 	Handle(ctx context.Context, obj runtime.Object) error
-	// Notify is called to notify about errors during processing.
+	// Notify is called to notify about errors during processing. The error
+	// may be of type `ErrPanic`, to indicates that the controller loop has
+	// panicked, or `nil` to indicate an informational message.
 	Notify(ctx context.Context, key string, err error)
 }
 
@@ -52,6 +55,11 @@ func (r *handler[T]) Notify(
 		log.WithError(err).WithFields(log.Fields{
 			"handler": r.base.Error(),
 		}).Error(msg)
+		if errors.Is(err, ErrPanic) {
+			//nolint:errcheck // we want do not want to handle errors here.
+			// #nosec G104 // we want do not want to handle errors here.
+			log.StandardLogger().Out.Write(debug.Stack())
+		}
 	} else {
 		log.WithFields(log.Fields{
 			"handler": r.base.Error(),

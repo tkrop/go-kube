@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/tkrop/go-kube/errors"
 )
 
@@ -159,6 +160,13 @@ func (c *controller[T]) List(namespace, name string, uid types.UID) []T {
 			results = append(results, result)
 		}
 	}
+
+	log.WithFields(log.Fields{
+		"namespace": namespace,
+		"name":      name,
+		"uid":       uid,
+		"results":   len(results),
+	}).Debugf("listing %s", c.config.Name)
 
 	return results
 }
