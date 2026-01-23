@@ -2,11 +2,25 @@ package controller
 
 import (
 	"context"
-	"runtime/debug"
+	"fmt"
+	goruntime "runtime"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tkrop/go-kube/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+)
+
+const (
+	// StackFrames is the number of stack frames to capture.
+	StackFrames = 16
+	// StackBufferSize is the initial size of the buffer used to capture the
+	// stack trace.
+	StackBufferSize = StackFrames * 64
+	// StackFramesSkip is the number of stack frames to skip when capturing a
+	// stack trace. This includes the frames for capturing the stack trace and
+	// to call the Stack function.
+	StackFramesSkip = 5
 )
 
 // Handler is the interface the resource event handler.
@@ -51,18 +65,43 @@ func (r *handler[T]) Handle(
 func (r *handler[T]) Notify(
 	_ context.Context, msg string, err error,
 ) {
-	if err != nil {
-		log.WithError(err).WithFields(log.Fields{
-			"handler": r.base.Error(),
-		}).Error(msg)
-		if errors.Is(err, ErrPanic) {
-			//nolint:errcheck // we want do not want to handle errors here.
-			// #nosec G104 // we want do not want to handle errors here.
-			log.StandardLogger().Out.Write(debug.Stack())
-		}
+	logger := log.WithFields(log.Fields{
+		"handler": r.base.Error(),
+	})
+
+	if errors.Is(err, ErrPanic) {
+		stack := Stack(StackFramesSkip)
+		logger.WithError(err).Error(msg)
+		//nolint:errcheck // we want do not want to handle errors here.
+		// #nosec G104 // we want do not want to handle errors here.
+		log.StandardLogger().Out.Write(stack)
+	} else if err != nil {
+		logger.WithError(err).Error(msg)
 	} else {
-		log.WithFields(log.Fields{
-			"handler": r.base.Error(),
-		}).Trace(msg)
+		logger.Trace(msg)
 	}
+}
+
+// Stack returns the current stack trace, skipping the given number of frames.
+func Stack(skip int) []byte {
+	pc := make([]uintptr, StackFrames)
+	n := goruntime.Callers(skip, pc)
+	frames := goruntime.CallersFrames(pc[:n])
+
+	builder := strings.Builder{}
+	builder.Grow(StackBufferSize)
+
+	for {
+		frame, more := frames.Next()
+		if frame.Function == "" {
+			break
+		}
+		fmt.Fprintf(&builder, "%s\n\t%s:%d\n",
+			frame.Function, frame.File, frame.Line)
+		if !more {
+			break
+		}
+	}
+
+	return []byte(builder.String())
 }

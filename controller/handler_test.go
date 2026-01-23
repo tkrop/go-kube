@@ -140,3 +140,40 @@ func TestHandlerNotify(t *testing.T) {
 			// Then
 		})
 }
+
+type stackParams struct {
+	skip   int
+	expect string
+}
+
+var stackTestCases = map[string]stackParams{
+	"with-default-skip": {
+		skip:   2,
+		expect: "github.com/tkrop/go-kube/controller_test.TestStack.func1\n\t",
+	},
+
+	"with-zero-skip": {
+		skip:   0,
+		expect: "runtime.Callers\n\t",
+	},
+
+	"with-large-skip": {
+		skip:   100,
+		expect: "",
+	},
+}
+
+func TestStack(t *testing.T) {
+	test.Map(t, stackTestCases).
+		Run(func(t test.Test, param stackParams) {
+			// When
+			stack := controller.Stack(param.skip)
+
+			// Then
+			if param.expect == "" {
+				assert.Empty(t, string(stack))
+			} else {
+				assert.Contains(t, string(stack), param.expect)
+			}
+		})
+}
