@@ -146,7 +146,7 @@ func (e *Error) String() string {
 func (e *Error) New(msg string, args ...any) error {
 	args = append([]any{e}, args...)
 
-	//nolint:goerr113 // ignore error check.
+	//nolint:err113 // ignore error check.
 	return fmt.Errorf("%w - "+msg, args...)
 }
 
