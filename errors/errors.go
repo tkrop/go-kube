@@ -1,3 +1,4 @@
+//revive:disable:package-naming // intentional override.
 package errors
 
 import (
