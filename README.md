@@ -5,7 +5,6 @@
 [![Coverage][coverage-badge]][coverage-link]
 [![Quality][quality-badge]][quality-link]
 [![Report][report-badge]][report-link]
-[![FOSSA][fossa-badge]][fossa-link]
 [![License][license-badge]][license-link]
 [![Docs][docs-badge]][docs-link]
 <!--
@@ -28,10 +27,7 @@
 [report-badge]: https://goreportcard.com/badge/github.com/tkrop/go-kube
 [report-link]: https://goreportcard.com/report/github.com/tkrop/go-kube
 
-[fossa-badge]: https://app.fossa.com/api/projects/git%2Bgithub.com%2Ftkrop%2Ftesting.svg?type=shield&issueType=license
-[fossa-link]: https://app.fossa.com/projects/git%2Bgithub.com%2Ftkrop%2Ftesting?ref=badge_shield&issueType=license
-
-[license-badge]: https://img.shields.io/badge/License-MIT-yellow.svg
+[license-badge]: https://img.shields.io/badge/License-MIT-green.svg
 [license-link]: https://opensource.org/licenses/MIT
 
 [docs-badge]: https://pkg.go.dev/badge/github.com/tkrop/go-kube.svg
@@ -47,11 +43,14 @@
 
 ## Introduction
 
-Goal of `go-kube` Kubernetes framework is to provide some simple patterns for
-interacting with Kubernetes API server mostly using the Kubernetes [Go
-Client][client-go]. The main pattern provided is a [controller](controller)
-framework wrapping a central set of [cache.Indexers][indexers].
+The [`go-kube`][go-kube] Kubernetes framework provides some simple patterns
+for interacting with Kubernetes API server mostly using the Kubernetes
+[Go Client][client-go].
 
+The main pattern provided is a [controller](controller) framework wrapping a
+central set of [cache.Indexers][indexers].
+
+[go-kube]: <https://pkg.go.dev/github.com/tkrop/go-kube>
 [client-go]: <https://github.com/kubernetes/client-go>
 [indexers]: <https://pkg.go.dev/k8s.io/client-go/tools/cache#Indexers>
 
@@ -96,3 +95,13 @@ project has more than 25 Stars, I will introduce semantic versions `v1`.
 If you like to contribute, please create an issue and/or pull request with a
 proper description of your proposal or contribution. I will review it and
 provide feedback on it as fast as possible.
+
+
+## Disclaimer
+
+This software is developed with the help of AI following the highest human
+standards. All actions executed by AI are carefully reviewed, counter-checked,
+and corrected with the highest human standards and quality goals in mind. No
+AI generate code is allowed to be merged or released without a careful human
+reviews to prevent systematic degeneration of coding standards and code
+quality.
