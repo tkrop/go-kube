@@ -166,6 +166,7 @@ func TestNewResourceEventHandler(t *testing.T) {
 
 type onAddParams struct {
 	setup  mock.SetupFunc
+	filter controller.Filter
 	obj    any
 	isInit bool
 }
@@ -188,6 +189,17 @@ var onAddTestCases = map[string]onAddParams{
 		obj:    pod("init-pod"),
 		isInit: true,
 	},
+
+	"filter-passing": {
+		setup:  mock.Chain(CallQueueAdd("default/test-pod")),
+		filter: Pass(true),
+		obj:    pod("test-pod"),
+	},
+
+	"filter-dropping": {
+		filter: Pass(false),
+		obj:    pod("test-pod"),
+	},
 }
 
 func TestOnAdd(t *testing.T) {
@@ -198,7 +210,7 @@ func TestOnAdd(t *testing.T) {
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			queue := mock.Get(mocks, NewMockQueue[string])
 			eventHandler := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue)
+				handler, queue, Filters(param.filter)...)
 
 			// When
 			eventHandler.OnAdd(param.obj, param.isInit)
@@ -207,6 +219,7 @@ func TestOnAdd(t *testing.T) {
 
 type onUpdateParams struct {
 	setup  mock.SetupFunc
+	filter controller.Filter
 	oldObj any
 	newObj any
 }
@@ -223,6 +236,25 @@ var onUpdateTestCases = map[string]onUpdateParams{
 		oldObj: pod("old-pod"),
 		newObj: "invalid",
 	},
+
+	"filter-drops-resync": {
+		filter: controller.ResourceVersionChanged(),
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "100"),
+	},
+
+	"filter-passes-change": {
+		setup:  mock.Chain(CallQueueAdd("default/pod")),
+		filter: controller.ResourceVersionChanged(),
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "101"),
+	},
+
+	"filter-drops-status-write": {
+		filter: controller.GenerationChanged(),
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "101"),
+	},
 }
 
 func TestOnUpdate(t *testing.T) {
@@ -233,7 +265,7 @@ func TestOnUpdate(t *testing.T) {
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			queue := mock.Get(mocks, NewMockQueue[string])
 			eventHandler := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue)
+				handler, queue, Filters(param.filter)...)
 
 			// When
 			eventHandler.OnUpdate(param.oldObj, param.newObj)
@@ -241,8 +273,9 @@ func TestOnUpdate(t *testing.T) {
 }
 
 type onDeleteParams struct {
-	setup mock.SetupFunc
-	obj   any
+	setup  mock.SetupFunc
+	filter controller.Filter
+	obj    any
 }
 
 var onDeleteTestCases = map[string]onDeleteParams{
@@ -263,6 +296,21 @@ var onDeleteTestCases = map[string]onDeleteParams{
 		setup: mock.Chain(CallProcessorHandlerNotify("")),
 		obj:   "invalid",
 	},
+
+	// The tombstone is no resource and therefore filtered as nil object.
+	"filter-tombstone": {
+		setup:  mock.Chain(CallQueueAdd("default/tombstone-pod")),
+		filter: controller.GenerationChanged(),
+		obj: cache.DeletedFinalStateUnknown{
+			Key: "default/tombstone-pod",
+			Obj: pod("tombstone-pod"),
+		},
+	},
+
+	"filter-dropping": {
+		filter: Pass(false),
+		obj:    pod("deleted-pod"),
+	},
 }
 
 func TestOnDelete(t *testing.T) {
@@ -273,7 +321,7 @@ func TestOnDelete(t *testing.T) {
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			queue := mock.Get(mocks, NewMockQueue[string])
 			eventHandler := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue)
+				handler, queue, Filters(param.filter)...)
 
 			// When
 			eventHandler.OnDelete(param.obj)

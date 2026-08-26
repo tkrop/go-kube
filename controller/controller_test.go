@@ -608,6 +608,35 @@ var controllerListTestCases = map[string]controllerListParams{
 		indexer:   NewIndexer(d1, p1, p2, p3, p4, p5, p6, p7),
 		expect:    []*corev1.Pod{p1, p2, p3, p4, p5},
 	},
+
+	// Indexed lookups using the registered owner indexers.
+	"index-by-uid": {
+		namespace: "default",
+		uid:       "owner-id",
+		indexer:   NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:    []*corev1.Pod{p2, p3},
+	},
+
+	"index-by-name": {
+		namespace: "default",
+		name:      "owner",
+		indexer:   NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:    []*corev1.Pod{p2, p4},
+	},
+
+	"index-by-uid-and-name": {
+		namespace: "default",
+		name:      "owner",
+		uid:       "owner-id",
+		indexer:   NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:    []*corev1.Pod{p2},
+	},
+
+	"index-without-owner": {
+		namespace: "default",
+		indexer:   NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:    []*corev1.Pod{p1, p2, p3, p4, p5},
+	},
 }
 
 func TestControllerList(t *testing.T) {
@@ -630,5 +659,61 @@ func TestControllerList(t *testing.T) {
 		}).
 		Cleanup(func() {
 			log.SetLevel(log.InfoLevel)
+		})
+}
+
+type controllerListByIndexParams struct {
+	index   string
+	value   string
+	indexer cache.Indexer
+	expect  []*corev1.Pod
+}
+
+var controllerListByIndexTestCases = map[string]controllerListByIndexParams{
+	"by-owner-uid": {
+		index:   controller.IndexOwnerUID,
+		value:   "owner-id",
+		indexer: NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:  []*corev1.Pod{p2, p3, p7},
+	},
+
+	"by-owner-name": {
+		index:   controller.IndexOwnerName,
+		value:   "owner",
+		indexer: NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:  []*corev1.Pod{p2, p4, p7},
+	},
+
+	"unknown-value": {
+		index:   controller.IndexOwnerUID,
+		value:   "missing",
+		indexer: NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:  []*corev1.Pod{},
+	},
+
+	"unknown-index": {
+		index:   "missing",
+		value:   "owner-id",
+		indexer: NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:  []*corev1.Pod{},
+	},
+}
+
+func TestControllerListByIndex(t *testing.T) {
+	test.Map(t, controllerListByIndexTestCases).
+		Run(func(t test.Test, param controllerListByIndexParams) {
+			// Given
+			mocks := mock.NewMocks(t)
+			retriever := mock.Get(mocks, NewMockRetriever[*corev1.PodList])
+			ctrl := controller.New[*corev1.Pod](
+				Config("list-index"), retriever, cache.Indexers{})
+			reflect.NewAccessor(reflect.NewAccessor(ctrl).Get("informer")).
+				Set("indexer", GetIndexer(mocks, param.indexer))
+
+			// When
+			result := ctrl.ListByIndex(param.index, param.value)
+
+			// Then
+			assert.ElementsMatch(t, param.expect, result)
 		})
 }

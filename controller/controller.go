@@ -59,9 +59,17 @@ type Controller[T runtime.Object] interface {
 	// considered. If the namespace, name, and uid are empty, all objects are
 	// returned.
 	List(namespace, name string, uid types.UID) []T
-	// AddHandler will add a new handler with the given name to the controller.
-	// The name is used to distinguish the handler queues in the metrics.
-	AddHandler(name string, handler Handler[T], recorder Recorder) error
+	// ListByIndex retrieves all objects stored under the given value in the
+	// index with the given name. It retrieves no objects, if the index is not
+	// registered via the indexers provided to `New`.
+	ListByIndex(index, value string) []T
+	// AddHandler will add a new handler with the given name to the controller
+	// that only receives the resource events passing all given filters. The
+	// name is used to distinguish the handler queues in the metrics. Without
+	// filters all events are enqueued.
+	AddHandler(
+		name string, handler Handler[T], recorder Recorder, filter ...Filter,
+	) error
 }
 
 // controller is the implementation of the cache interface.
@@ -77,7 +85,9 @@ type controller[T runtime.Object] struct {
 }
 
 // New creates a new controller for given retriever using given configuration
-// and indexers.
+// and indexers. To narrow the observed resources by label or field selectors,
+// apply them to the list options in the given retriever. To look up resources
+// by owner without scanning the whole cache, register the `OwnerIndexers`.
 func New[T runtime.Object, L runtime.Object](
 	config *Config, retriever Retriever[L], indexers cache.Indexers,
 ) Controller[T] {
@@ -98,10 +108,12 @@ func New[T runtime.Object, L runtime.Object](
 	}
 }
 
-// AddHandler will add a new handler with the given name to the controller.
-// The name is used to distinguish the handler queues in the metrics.
+// AddHandler will add a new handler with the given name to the controller
+// that only receives the resource events passing all given filters. The name
+// is used to distinguish the handler queues in the metrics. Without filters
+// all events are enqueued.
 func (c *controller[T]) AddHandler(
-	name string, handler Handler[T], recorder Recorder,
+	name string, handler Handler[T], recorder Recorder, filter ...Filter,
 ) error {
 	// TODO: check whether we can simplify the rate limiter creation?
 	limiter := c.config.RateLimiter
@@ -112,8 +124,8 @@ func (c *controller[T]) AddHandler(
 	queue := NewRateLimitedQueue(name, limiter(),
 		c.config.Retries, recorder)
 
-	if err := c.addHandler(name,
-		NewResourceEventHandler[T](handler, queue)); err != nil {
+	if err := c.addHandler(name, NewResourceEventHandler[T](
+		handler, queue, filter...)); err != nil {
 		return err
 	}
 
@@ -179,8 +191,9 @@ func (c *controller[T]) Get(key string) (T, error) {
 // considered. If the namespace, name, and uid are empty, all objects are
 // returned.
 func (c *controller[T]) List(namespace, name string, uid types.UID) []T {
-	results := []T{}
-	for _, value := range c.informer.GetIndexer().List() {
+	values := c.lookup(name, uid)
+	results := make([]T, 0, len(values))
+	for _, value := range values {
 		if result, ok := value.(T); ok &&
 			c.owner(namespace, name, uid, result) {
 			results = append(results, result)
@@ -194,6 +207,49 @@ func (c *controller[T]) List(namespace, name string, uid types.UID) []T {
 			"uid":       uid,
 			"results":   len(results),
 		}).Tracef("listing %s", c.config.Name)
+	}
+
+	return results
+}
+
+// lookup collects the candidate objects for the owner with the given object
+// name and uid using the most selective owner index registered via the
+// indexers provided to `New`. It falls back to scanning the whole cache, if
+// no suitable index is registered.
+func (c *controller[T]) lookup(name string, uid types.UID) []any {
+	indexer := c.informer.GetIndexer()
+
+	if uid != "" {
+		if values, err := indexer.ByIndex(
+			IndexOwnerUID, string(uid)); err == nil {
+			return values
+		}
+	}
+
+	if name != "" {
+		if values, err := indexer.ByIndex(
+			IndexOwnerName, name); err == nil {
+			return values
+		}
+	}
+
+	return indexer.List()
+}
+
+// ListByIndex retrieves all objects stored under the given value in the index
+// with the given name. It retrieves no objects, if the index is not registered
+// via the indexers provided to `New`.
+func (c *controller[T]) ListByIndex(index, value string) []T {
+	values, err := c.informer.GetIndexer().ByIndex(index, value)
+	if err != nil {
+		return []T{}
+	}
+
+	results := make([]T, 0, len(values))
+	for _, value := range values {
+		if result, ok := value.(T); ok {
+			results = append(results, result)
+		}
 	}
 
 	return results

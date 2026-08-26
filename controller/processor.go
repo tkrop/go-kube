@@ -17,48 +17,79 @@ var ErrPanic = errors.New("panic")
 type ResourceEventHandler[T runtime.Object] struct {
 	handler Handler[T]
 	queue   Queue[string]
+	filter  Filter
 }
 
-// NewResourceEventHandler creates a new event handler.
+// NewResourceEventHandler creates a new event handler only enqueuing the
+// resource events passing all given filters. Without filters all events are
+// enqueued.
 func NewResourceEventHandler[T runtime.Object](
 	handler Handler[T],
 	queue Queue[string],
+	filter ...Filter,
 ) *ResourceEventHandler[T] {
 	return &ResourceEventHandler[T]{
 		handler: handler,
 		queue:   queue,
+		filter:  combine(filter),
 	}
+}
+
+// combine merges the given filters into a single filter. It returns nil, if
+// no filters are given, to enqueue all resource events.
+func combine(filter []Filter) Filter {
+	if len(filter) == 0 {
+		return nil
+	}
+
+	return And(filter...)
 }
 
 // OnAdd is called when an object is added.
 func (r *ResourceEventHandler[T]) OnAdd(obj any, _ bool) {
-	ctx := context.Background()
-	if key, err := cache.MetaNamespaceKeyFunc(obj); err != nil {
-		r.handler.Notify(ctx, key, err)
-	} else {
-		r.queue.Add(ctx, key)
-	}
+	r.enqueue(OpAdd, nil, obj, cache.MetaNamespaceKeyFunc)
 }
 
 // OnUpdate is called when an object is updated.
-func (r *ResourceEventHandler[T]) OnUpdate(_, obj any) {
-	ctx := context.Background()
-	if key, err := cache.MetaNamespaceKeyFunc(obj); err != nil {
-		r.handler.Notify(ctx, key, err)
-	} else {
-		r.queue.Add(ctx, key)
-	}
+func (r *ResourceEventHandler[T]) OnUpdate(prev, obj any) {
+	r.enqueue(OpUpdate, prev, obj, cache.MetaNamespaceKeyFunc)
 }
 
 // OnDelete is called when an object is deleted.
 func (r *ResourceEventHandler[T]) OnDelete(obj any) {
+	r.enqueue(OpDelete, nil, obj,
+		cache.DeletionHandlingMetaNamespaceKeyFunc)
+}
+
+// enqueue adds the key of the given object to the queue, if the event passes
+// the configured filter.
+func (r *ResourceEventHandler[T]) enqueue(
+	op Op, prev, obj any, keyfn cache.KeyFunc,
+) {
 	ctx := context.Background()
-	if key, err := cache.
-		DeletionHandlingMetaNamespaceKeyFunc(obj); err != nil {
+
+	key, err := keyfn(obj)
+	if err != nil {
 		r.handler.Notify(ctx, key, err)
-	} else {
-		r.queue.Add(ctx, key)
+
+		return
 	}
+
+	if r.filter != nil && !r.filter(op, object(prev), object(obj)) {
+		return
+	}
+
+	r.queue.Add(ctx, key)
+}
+
+// object converts the given event object into a resource object. It returns
+// nil, if the object is no resource, e.g. a deletion tombstone.
+func object(obj any) runtime.Object {
+	if result, ok := obj.(runtime.Object); ok {
+		return result
+	}
+
+	return nil
 }
 
 // Processor is the default implementation of a processor.
