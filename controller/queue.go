@@ -30,6 +30,8 @@ type Queue[T comparable] interface {
 	// Requeue will add an item to the queue in a requeue mode. If will
 	// return an error if an item has reached max requeue attempts.
 	Requeue(ctx context.Context, item T) error
+	// Forget resets the requeue back-off state of an item.
+	Forget(ctx context.Context, item T)
 	// Get is returning the first item in the queue. If the last item has not
 	// been finished, the request will block until the queue is notified.
 	Get(ctx context.Context) (item T, shutdown bool)
@@ -40,12 +42,23 @@ type Queue[T comparable] interface {
 }
 
 // NewDefaultQueue creates a new default queue with given number of retries
-// and given recorder for monitoring.
+// and given recorder for monitoring applying the default back-off strategy.
 func NewDefaultQueue(
 	name string, retries int, recorder Recorder,
 ) Queue[string] {
-	queue := NewRetryQueue(name, workqueue.NewTypedRateLimitingQueue(
-		workqueue.DefaultTypedControllerRateLimiter[string]()), retries)
+	return NewRateLimitedQueue(name,
+		workqueue.DefaultTypedControllerRateLimiter[string](),
+		retries, recorder)
+}
+
+// NewRateLimitedQueue creates a new queue with given number of retries and
+// given recorder for monitoring applying the given back-off strategy.
+func NewRateLimitedQueue(
+	name string, limiter workqueue.TypedRateLimiter[string],
+	retries int, recorder Recorder,
+) Queue[string] {
+	queue := NewRetryQueue(name,
+		workqueue.NewTypedRateLimitingQueue(limiter), retries)
 
 	// Wrap with monitoring if recorder is provided.
 	if recorder != nil {
@@ -63,7 +76,8 @@ type RetryQueue[T comparable] struct {
 }
 
 // NewRetryQueue creates a new rate limiting queue with the given work queue
-// and max retries.
+// and max retries. A negative number of retries requeues items indefinitely,
+// zero drops items on the first failure.
 func NewRetryQueue[T comparable](
 	name string, queue workqueue.TypedRateLimitingInterface[T], retries int,
 ) Queue[T] {
@@ -90,9 +104,9 @@ func (q *RetryQueue[T]) Add(_ context.Context, item T) {
 }
 
 // Requeue re-adds the given item to the queue if the max retries has not been
-// reached yet.
+// reached yet. A negative number of retries requeues the item indefinitely.
 func (q *RetryQueue[T]) Requeue(_ context.Context, item T) error {
-	if q.queue.NumRequeues(item) < q.retries {
+	if q.retries < 0 || q.queue.NumRequeues(item) < q.retries {
 		q.queue.AddRateLimited(item)
 
 		return nil
@@ -101,6 +115,11 @@ func (q *RetryQueue[T]) Requeue(_ context.Context, item T) error {
 	q.queue.Forget(item)
 
 	return ErrMaxRetries
+}
+
+// Forget resets the requeue back-off state of the given item.
+func (q *RetryQueue[T]) Forget(_ context.Context, item T) {
+	q.queue.Forget(item)
 }
 
 // Get returns the first item in the queue. If the last item has not been

@@ -13,7 +13,9 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tkrop/go-testing/mock"
+	"github.com/tkrop/go-testing/reflect"
 	"github.com/tkrop/go-testing/test"
 
 	"github.com/tkrop/go-kube/controller"
@@ -60,6 +62,13 @@ func CallQueueDone(key string) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
 			Done(gomock.Any(), key)
+	}
+}
+
+func CallQueueForget(key string) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
+			Forget(gomock.Any(), key)
 	}
 }
 
@@ -273,19 +282,28 @@ func TestOnDelete(t *testing.T) {
 
 type newProcessorParams struct {
 	workers int
+	expect  int
 }
 
 var newProcessorTestCases = map[string]newProcessorParams{
 	"with-single-worker": {
 		workers: 1,
+		expect:  1,
 	},
 
 	"with-multiple-workers": {
 		workers: 3,
+		expect:  3,
 	},
 
 	"with-zero-workers": {
 		workers: 0,
+		expect:  0,
+	},
+
+	"with-negative-workers": {
+		workers: -1,
+		expect:  -1,
 	},
 }
 
@@ -306,7 +324,9 @@ func TestNewProcessor(t *testing.T) {
 				handler, informer, param.workers, queue, recorder)
 
 			// Then
-			assert.NotNil(t, processor)
+			require.NotNil(t, processor)
+			assert.Equal(t, param.expect,
+				reflect.NewAccessor(processor).Get("workers"))
 		})
 }
 
@@ -316,6 +336,15 @@ type runParams struct {
 }
 
 var runTestCases = map[string]runParams{
+	"no-workers": {
+		setup: mock.Chain(
+			CallProcessorHandlerNotify("starting processor"),
+			CallProcessorHandlerNotify("stopping processor"),
+			CallQueueShutDown(),
+		),
+		workers: 0,
+	},
+
 	"single-worker": {
 		setup: mock.Chain(
 			CallProcessorHandlerNotify("starting processor"),
@@ -382,6 +411,7 @@ var processTestCases = map[string]processParams{
 			CallQueueGet("default/test-pod", false),
 			CallIndexerGetByKey("default/test-pod", pod("test-pod"), true, nil),
 			CallHandlerHandle(pod("test-pod"), nil),
+			CallQueueForget("default/test-pod"),
 			CallQueueName("test-queue"),
 			CallRecorderDoneEventAny("test-queue", true),
 			CallQueueDone("default/test-pod"),
@@ -395,6 +425,7 @@ var processTestCases = map[string]processParams{
 			CallQueueGet("default/test-pod", false),
 			CallIndexerGetByKey("default/test-pod", pod("test-pod"), true, nil),
 			CallHandlerHandle(pod("test-pod"), nil),
+			CallQueueForget("default/test-pod"),
 			CallQueueDone("default/test-pod"),
 			CallQueueGet("", true)),
 		withQueue: true,
@@ -415,6 +446,7 @@ var processTestCases = map[string]processParams{
 		setup: mock.Chain(
 			CallQueueGet("default/missing-pod", false),
 			CallIndexerGetByKey("default/missing-pod", nil, false, nil),
+			CallQueueForget("default/missing-pod"),
 			CallQueueDone("default/missing-pod"),
 			CallQueueGet("", true)),
 		withQueue: true,
@@ -469,9 +501,40 @@ var processTestCases = map[string]processParams{
 				true, nil),
 			CallHandlerHandlePanic(pod("panic-pod"), "handler panic"),
 			CallProcessorHandlerNotify("default/panic-pod"),
+			CallQueueName("test-queue"),
+			CallRecorderDoneEventAny("test-queue", false),
 			CallQueueDone("default/panic-pod"),
 			CallQueueGet("", true)),
-		withQueue: true,
+		withRecorder: true,
+		withQueue:    true,
+	},
+
+	"type-assertion-error-with-recorder": {
+		setup: mock.Chain(
+			CallQueueGet("default/invalid-type", false),
+			CallIndexerGetByKey("default/invalid-type",
+				"not-a-runtime-object", true, nil),
+			CallProcessorHandlerNotify("default/invalid-type"),
+			CallQueueName("test-queue"),
+			CallRecorderDoneEventAny("test-queue", false),
+			CallQueueDone("default/invalid-type"),
+			CallQueueGet("", true)),
+		withRecorder: true,
+		withQueue:    true,
+	},
+
+	"indexer-get-error-with-recorder": {
+		setup: mock.Chain(
+			CallQueueGet("default/error-pod", false),
+			CallIndexerGetByKey("default/error-pod", nil, false,
+				assert.AnError),
+			CallProcessorHandlerNotify("default/error-pod"),
+			CallQueueName("test-queue"),
+			CallRecorderDoneEventAny("test-queue", false),
+			CallQueueDone("default/error-pod"),
+			CallQueueGet("", true)),
+		withRecorder: true,
+		withQueue:    true,
 	},
 }
 

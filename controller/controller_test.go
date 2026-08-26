@@ -2,7 +2,6 @@ package controller_test
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 
 	"go.uber.org/mock/gomock"
 
@@ -86,6 +86,26 @@ func CallRecorderAddEvent() mock.SetupFunc {
 	}
 }
 
+func CallRecorderEventAny() mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		recorder := mock.Get(mocks, NewMockRecorder)
+		recorder.EXPECT().
+			GetEvent(gomock.Any(), gomock.Any(), gomock.Any()).
+			AnyTimes()
+
+		return recorder.EXPECT().DoneEvent(gomock.Any(), gomock.Any(),
+			gomock.Any(), gomock.Any()).AnyTimes()
+	}
+}
+
+func CallHandlerHandleAny() mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
+			Handle(gomock.Any(), gomock.Any()).Return(nil).
+			AnyTimes()
+	}
+}
+
 func CallHandlerNotify(key string, err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
@@ -150,44 +170,174 @@ func TestControllerNew(t *testing.T) {
 		})
 }
 
+type configLimiterParams struct {
+	limiter controller.RateLimiter
+	setup   mock.SetupFunc
+}
+
+var configLimiterTestCases = map[string]configLimiterParams{
+	"default-limiter": {
+		setup: CallRecorderLen("add-handler"),
+	},
+
+	"custom-limiter": {
+		limiter: func() workqueue.TypedRateLimiter[string] {
+			return workqueue.NewTypedItemFastSlowRateLimiter[string](
+				time.Millisecond, time.Second, 1)
+		},
+		setup: CallRecorderLen("add-handler"),
+	},
+}
+
+func TestConfigLimiter(t *testing.T) {
+	test.Map(t, configLimiterTestCases).
+		Run(func(t test.Test, param configLimiterParams) {
+			// Given
+			mocks := mock.NewMocks(t).Expect(param.setup)
+			config := Config("add-handler")
+			config.RateLimiter = param.limiter
+			ctrl := controller.New[*corev1.Pod](config,
+				mock.Get(mocks, NewMockRetriever[*corev1.PodList]),
+				cache.Indexers{})
+
+			// When
+			err := ctrl.AddHandler("add-handler",
+				mock.Get(mocks, NewMockHandler[*corev1.Pod]),
+				mock.Get(mocks, NewMockRecorder))
+
+			// Then
+			assert.NoError(t, err)
+		})
+}
+
+// podEventHandlers is the handler slice retained by the controller.
+type podEventHandlers = []*controller.ResourceEventHandler[*corev1.Pod]
+
+// handlerSpec captures the observable identity of a retained event handler.
+// The handlers cannot be compared as a whole, since their queues wrap live
+// channels and a condition variable.
+type handlerSpec struct {
+	handler controller.Handler[*corev1.Pod]
+	queue   string
+}
+
+// handlerSpecs extracts the specs of the handlers retained by the controller.
+func handlerSpecs(ctrl controller.Controller[*corev1.Pod]) []handlerSpec {
+	handlers := test.Cast[podEventHandlers](
+		reflect.NewAccessor(ctrl).Get("handler"))
+
+	specs := make([]handlerSpec, 0, len(handlers))
+	for _, handler := range handlers {
+		accessor := reflect.NewAccessor(handler)
+		specs = append(specs, handlerSpec{
+			handler: test.Cast[controller.Handler[*corev1.Pod]](
+				accessor.Get("handler")),
+			queue: test.Cast[controller.Queue[string]](
+				accessor.Get("queue")).Name(),
+		})
+	}
+
+	return specs
+}
+
+// CallInformerAddHandler sets up the handler registration on the informer.
+// The registered handler is created inside the controller and therefore only
+// validated via the retained handler specs.
+func CallInformerAddHandler(err error) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockSharedIndexInformer).EXPECT().
+			AddEventHandlerWithResyncPeriod(gomock.Any(), time.Minute).
+			Return(nil, err)
+	}
+}
+
+// CallInformerGetIndexer sets up the indexer lookup on the informer.
+func CallInformerGetIndexer() mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockSharedIndexInformer).EXPECT().
+			GetIndexer().Return(nil)
+	}
+}
+
+// ErrAddHandler creates the error expected when registering the handler with
+// the given name fails.
+func ErrAddHandler(name string, err error) error {
+	return controller.ErrController.New(
+		"event handler [name=%s, handler=%s] %w", "add-handler", name, err)
+}
+
 type controllerAddHandlerParams struct {
 	setup  mock.SetupFunc
-	before func(ctrl controller.Controller[*corev1.Pod])
-	expect func(ctrl controller.Controller[*corev1.Pod]) error
+	names  []string
+	expect []string
+	errors []error
 }
 
 var controllerAddHandlerTestCases = map[string]controllerAddHandlerParams{
 	"success": {
-		setup: CallRecorderLen("add-handler"),
+		setup: mock.Chain(
+			CallRecorderLen("add-handler"),
+			CallInformerAddHandler(nil),
+			CallInformerGetIndexer(),
+		),
+		names:  []string{"add-handler"},
+		expect: []string{"add-handler"},
+		errors: []error{nil},
 	},
+
+	"second-handler": {
+		setup: mock.Chain(
+			CallRecorderLen("add-handler"),
+			CallInformerAddHandler(nil),
+			CallInformerGetIndexer(),
+			CallRecorderLen("other-handler"),
+			CallInformerAddHandler(nil),
+			CallInformerGetIndexer(),
+		),
+		names:  []string{"add-handler", "other-handler"},
+		expect: []string{"add-handler", "other-handler"},
+		errors: []error{nil, nil},
+	},
+
 	"error": {
 		setup: mock.Chain(
-			CallRetrieverWatchEndless[*corev1.PodList](),
-			CallRetrieverList(NewPodList(p1, p2), nil),
 			CallRecorderLen("add-handler"),
+			CallInformerAddHandler(assert.AnError),
 		),
-		before: func(ctrl controller.Controller[*corev1.Pod]) {
-			ctx, cancel := context.WithCancel(context.Background())
-			sigerr := make(chan error, 1)
-			ctrl.Init(ctx, sigerr)
-			go ctrl.Run(ctx)
-			time.Sleep(100 * time.Millisecond)
-			cancel()
-			// Wait with timeout for controller to shut down
-			select {
-			case <-sigerr:
-				// Controller shut down cleanly
-			case <-time.After(200 * time.Millisecond):
-				// Continue anyway - controller might still be shutting down
-			}
-			time.Sleep(50 * time.Millisecond)
+		names:  []string{"add-handler"},
+		expect: []string{},
+		errors: []error{
+			ErrAddHandler("add-handler", assert.AnError),
 		},
-		expect: func(ctrl controller.Controller[*corev1.Pod]) error {
-			return controller.ErrController.New("event handler [name=%s] %w",
-				"add-handler", fmt.Errorf("handler %v was not added to "+
-					"shared informer because it has stopped already",
-					test.Cast[[]*controller.ResourceEventHandler[*corev1.Pod]](
-						reflect.NewAccessor(ctrl).Get("handler"))[0]))
+	},
+
+	"second-handler-error": {
+		setup: mock.Chain(
+			CallRecorderLen("add-handler"),
+			CallInformerAddHandler(nil),
+			CallInformerGetIndexer(),
+			CallRecorderLen("other-handler"),
+			CallInformerAddHandler(assert.AnError),
+		),
+		names:  []string{"add-handler", "other-handler"},
+		expect: []string{"add-handler"},
+		errors: []error{
+			nil, ErrAddHandler("other-handler", assert.AnError),
+		},
+	},
+
+	"both-error": {
+		setup: mock.Chain(
+			CallRecorderLen("add-handler"),
+			CallInformerAddHandler(assert.AnError),
+			CallRecorderLen("other-handler"),
+			CallInformerAddHandler(assert.AnError),
+		),
+		names:  []string{"add-handler", "other-handler"},
+		expect: []string{},
+		errors: []error{
+			ErrAddHandler("add-handler", assert.AnError),
+			ErrAddHandler("other-handler", assert.AnError),
 		},
 	},
 }
@@ -201,21 +351,26 @@ func TestControllerAddHandler(t *testing.T) {
 				Config("add-handler"),
 				mock.Get(mocks, NewMockRetriever[*corev1.PodList]),
 				cache.Indexers{})
+			reflect.NewAccessor(ctrl).Set("informer",
+				mock.Get(mocks, NewMockSharedIndexInformer))
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			recorder := mock.Get(mocks, NewMockRecorder)
-			if param.before != nil {
-				param.before(ctrl)
-			}
 
 			// When
-			err := ctrl.AddHandler(handler, recorder)
+			errs := make([]error, 0, len(param.names))
+			for _, name := range param.names {
+				errs = append(errs, ctrl.AddHandler(name, handler, recorder))
+			}
 
 			// Then
-			if param.expect != nil {
-				assert.Equal(t, param.expect(ctrl), err)
-			} else {
-				assert.Nil(t, err)
+			assert.Equal(t, param.errors, errs)
+			expect := make([]handlerSpec, 0, len(param.expect))
+			for _, queue := range param.expect {
+				expect = append(expect, handlerSpec{
+					handler: handler, queue: queue,
+				})
 			}
+			assert.Equal(t, expect, handlerSpecs(ctrl))
 		})
 }
 
@@ -261,17 +416,41 @@ var controllerRunTestCases = map[string]controllerRunParams{
 		config: &controller.Config{
 			Name: "run", Workers: 0, Sync: time.Minute,
 		},
-		setup: mock.Chain(
-			CallRetrieverWatchEndless[*corev1.PodList](),
-			CallRecorderLen("run"),
-			CallRetrieverList(NewPodList(p1, p2), nil),
+		setup: mock.Setup(
+			mock.Chain(
+				CallRetrieverWatchEndless[*corev1.PodList](),
+				CallRecorderLen("run"),
+				CallRetrieverList(NewPodList(p1, p2), nil),
+			),
 			CallRecorderAddEvent(),
 			CallHandlerNotifyAny(),
 		),
 		before: func(ctrl controller.Controller[*corev1.Pod], mocks *mock.Mocks) {
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			recorder := mock.Get(mocks, NewMockRecorder)
-			_ = ctrl.AddHandler(handler, recorder)
+			_ = ctrl.AddHandler("run", handler, recorder)
+		},
+	},
+
+	"with-worker": {
+		config: &controller.Config{
+			Name: "run", Workers: 1, Sync: time.Minute,
+		},
+		setup: mock.Setup(
+			mock.Chain(
+				CallRetrieverWatchEndless[*corev1.PodList](),
+				CallRecorderLen("run"),
+				CallRetrieverList(NewPodList(p1, p2), nil),
+			),
+			CallRecorderAddEvent(),
+			CallRecorderEventAny(),
+			CallHandlerHandleAny(),
+			CallHandlerNotifyAny(),
+		),
+		before: func(ctrl controller.Controller[*corev1.Pod], mocks *mock.Mocks) {
+			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
+			recorder := mock.Get(mocks, NewMockRecorder)
+			_ = ctrl.AddHandler("run", handler, recorder)
 		},
 	},
 }

@@ -25,7 +25,7 @@ jobs:
     - name: Send coverage report
       uses: shogo82148/actions-goveralls@v1
       with:
-        path-to-profile: ./build/test-all.cover
+        path-to-profile: ./build/test.cover
 
 
   release:

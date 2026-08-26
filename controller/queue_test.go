@@ -59,6 +59,124 @@ func TestNewDefaultQueue(t *testing.T) {
 		})
 }
 
+func TestNewRateLimitedQueue(t *testing.T) {
+	test.Map(t, newDefaultQueueTestCases).
+		Run(func(t test.Test, param newDefaultQueueParams) {
+			// Given
+			mocks := mock.NewMocks(t)
+			var recorder controller.Recorder
+			if param.recorder != nil {
+				recorder = mock.Get(mocks, NewMockRecorder)
+			}
+
+			// When
+			queue := controller.NewRateLimitedQueue(param.name,
+				workqueue.DefaultTypedControllerRateLimiter[string](),
+				param.retries, recorder)
+
+			// Then
+			assert.NotNil(t, queue)
+			assert.Equal(t, param.name, queue.Name())
+		})
+}
+
+type retryQueueRetriesParams struct {
+	retries  int
+	requeues int
+	expect   []error
+}
+
+var retryQueueRetriesTestCases = map[string]retryQueueRetriesParams{
+	"retries-none": {
+		retries:  0,
+		requeues: 2,
+		expect:   []error{controller.ErrMaxRetries, controller.ErrMaxRetries},
+	},
+
+	// Exhausting the retries forgets the item and thereby resets the budget.
+	"retries-once": {
+		retries:  1,
+		requeues: 3,
+		expect:   []error{nil, controller.ErrMaxRetries, nil},
+	},
+
+	"retries-limited": {
+		retries:  3,
+		requeues: 4,
+		expect:   []error{nil, nil, nil, controller.ErrMaxRetries},
+	},
+
+	"retries-infinite": {
+		retries:  -1,
+		requeues: 5,
+		expect:   []error{nil, nil, nil, nil, nil},
+	},
+}
+
+func TestRetryQueueRetries(t *testing.T) {
+	test.Map(t, retryQueueRetriesTestCases).
+		Run(func(t test.Test, param retryQueueRetriesParams) {
+			// Given
+			queue := controller.NewRetryQueue("test-queue",
+				workqueue.NewTypedRateLimitingQueue(
+					workqueue.DefaultTypedControllerRateLimiter[string]()),
+				param.retries)
+			ctx := context.Background()
+			defer queue.ShutDown(ctx)
+
+			// When
+			errs := make([]error, 0, param.requeues)
+			for range param.requeues {
+				errs = append(errs, queue.Requeue(ctx, "item1"))
+			}
+
+			// Then
+			assert.Equal(t, param.expect, errs)
+		})
+}
+
+type retryQueueForgetParams struct {
+	retries  int
+	requeues int
+	expect   error
+}
+
+var retryQueueForgetTestCases = map[string]retryQueueForgetParams{
+	"forget-resets-budget": {
+		retries:  1,
+		requeues: 1,
+		expect:   nil,
+	},
+
+	"forget-resets-exhausted-budget": {
+		retries:  1,
+		requeues: 3,
+		expect:   nil,
+	},
+}
+
+func TestRetryQueueForget(t *testing.T) {
+	test.Map(t, retryQueueForgetTestCases).
+		Run(func(t test.Test, param retryQueueForgetParams) {
+			// Given
+			queue := controller.NewRetryQueue("test-queue",
+				workqueue.NewTypedRateLimitingQueue(
+					workqueue.DefaultTypedControllerRateLimiter[string]()),
+				param.retries)
+			ctx := context.Background()
+			defer queue.ShutDown(ctx)
+			for range param.requeues {
+				_ = queue.Requeue(ctx, "item1")
+			}
+
+			// When
+			queue.Forget(ctx, "item1")
+
+			// Then
+			assert.Equal(t, param.expect, queue.Requeue(ctx, "item1"))
+		})
+}
+
 type retryQueueParams struct {
 	// setup mock.SetupFunc
 	ops []queueOp
@@ -169,6 +287,8 @@ func TestRetryQueue(t *testing.T) {
 					if op.check != nil {
 						op.check(t, queue, err)
 					}
+				case "forget":
+					queue.Forget(ctx, op.item)
 				case "shutdown":
 					queue.ShutDown(ctx)
 				case "len":
@@ -215,6 +335,15 @@ var monitorQueueTestCases = map[string]monitorQueueParams{
 		ops: []queueOp{
 			{op: "shutdown"},
 			{op: "get", item: ""},
+		},
+	},
+
+	"forget": {
+		ops: []queueOp{
+			{op: "add", item: "item1"},
+			{op: "get", item: "item1"},
+			{op: "forget", item: "item1"},
+			{op: "done", item: "item1"},
 		},
 	},
 }
@@ -270,6 +399,8 @@ func TestMonitorQueue(t *testing.T) {
 					queue.Done(ctx, op.item)
 				case "requeue":
 					_ = queue.Requeue(ctx, op.item)
+				case "forget":
+					queue.Forget(ctx, op.item)
 				case "shutdown":
 					queue.ShutDown(ctx)
 				}

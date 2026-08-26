@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tkrop/go-kube/errors"
@@ -16,19 +17,33 @@ import (
 // ErrController is an operator error.
 var ErrController = errors.New("controller")
 
-// Config is the controller configuration.
+// RateLimiter creates the back-off strategy used to delay requeued events.
+type RateLimiter func() workqueue.TypedRateLimiter[string]
+
+// Config is the controller configuration. The values are used as provided -
+// defaults are supposed to be supplied by the config setup of the consumer.
 type Config struct {
 	// Name of the main controller resource.
 	Name string
 	// Workers is the number of concurrent workers the controller will run
-	// processing events.
+	// processing events. Values below one start no workers and thereby only
+	// cache the resources without processing events.
 	Workers int
 	// Sync is the interval in which the controller will process a re-capture
-	// of the selected resources from the API server.
+	// of the selected resources from the API server. Zero disables the
+	// periodic re-sync.
 	Sync time.Duration
-	// Retries is the number of times the controller will try to process an
-	// resource event before returning a real error.
+	// Retries is the number of times the controller retries processing of an
+	// event after a failure. Zero drops the event on the first failure, while
+	// a negative value retries indefinitely. Once the retries are exhausted
+	// the event is dropped and recovery depends on the next resource event or
+	// re-sync.
 	Retries int
+	// RateLimiter creates the back-off strategy used to delay requeued events.
+	// It is called once per handler to avoid sharing back-off state between
+	// queues. If unset, `workqueue.DefaultTypedControllerRateLimiter` is used,
+	// that starts at a 5ms delay doubling it up to 1000s.
+	RateLimiter RateLimiter
 }
 
 // Controller is the interface for managing the controller and accessing
@@ -44,8 +59,9 @@ type Controller[T runtime.Object] interface {
 	// considered. If the namespace, name, and uid are empty, all objects are
 	// returned.
 	List(namespace, name string, uid types.UID) []T
-	// AddHandler will add a new handler to the controller.
-	AddHandler(handler Handler[T], recorder Recorder) error
+	// AddHandler will add a new handler with the given name to the controller.
+	// The name is used to distinguish the handler queues in the metrics.
+	AddHandler(name string, handler Handler[T], recorder Recorder) error
 }
 
 // controller is the implementation of the cache interface.
@@ -82,13 +98,21 @@ func New[T runtime.Object, L runtime.Object](
 	}
 }
 
-// AddHandler will add a new handler to the controller.
+// AddHandler will add a new handler with the given name to the controller.
+// The name is used to distinguish the handler queues in the metrics.
 func (c *controller[T]) AddHandler(
-	handler Handler[T], recorder Recorder,
+	name string, handler Handler[T], recorder Recorder,
 ) error {
-	queue := NewDefaultQueue(c.config.Name, c.config.Retries, recorder)
+	// TODO: check whether we can simplify the rate limiter creation?
+	limiter := c.config.RateLimiter
+	if limiter == nil {
+		limiter = workqueue.DefaultTypedControllerRateLimiter[string]
+	}
 
-	if err := c.addHandler(
+	queue := NewRateLimitedQueue(name, limiter(),
+		c.config.Retries, recorder)
+
+	if err := c.addHandler(name,
 		NewResourceEventHandler[T](handler, queue)); err != nil {
 		return err
 	}
@@ -100,14 +124,16 @@ func (c *controller[T]) AddHandler(
 }
 
 // addHandler adds the given resource event handler to the informer.
-func (c *controller[T]) addHandler(handler *ResourceEventHandler[T]) error {
-	c.handler = append(c.handler, handler)
-
+func (c *controller[T]) addHandler(
+	name string, handler *ResourceEventHandler[T],
+) error {
 	if _, err := c.informer.AddEventHandlerWithResyncPeriod(
 		handler, c.config.Sync); err != nil {
-		return ErrController.New("event handler [name=%s] %w",
-			c.config.Name, err)
+		return ErrController.New("event handler [name=%s, handler=%s] %w",
+			c.config.Name, name, err)
 	}
+
+	c.handler = append(c.handler, handler)
 
 	return nil
 }
