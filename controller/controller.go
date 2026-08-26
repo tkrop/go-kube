@@ -156,8 +156,8 @@ type controller[T runtime.Object] struct {
 
 // New creates a new controller for given retriever using given configuration
 // and indexers. To narrow the observed resources by label or field selectors,
-// apply them to the list options in the given retriever. To look up resources
-// by owner without scanning the whole cache, register the `OwnerIndexers`.
+// wrap the retriever using `NewFilterRetriever`. To look up resources by
+// owner without scanning the whole cache, register the `OwnerIndexers`.
 func New[T runtime.Object, L runtime.Object](
 	config *Config, retriever Retriever[L], indexers cache.Indexers,
 ) Controller[T] {
