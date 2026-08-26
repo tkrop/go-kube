@@ -7,10 +7,14 @@ import (
 	"time"
 
 	"go.uber.org/mock/gomock"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tkrop/go-testing/mock"
+	"github.com/tkrop/go-testing/reflect"
 	"github.com/tkrop/go-testing/test"
 
 	"github.com/tkrop/go-kube/controller"
@@ -101,6 +105,89 @@ var defaultLeaderConfig = &controller.LeaderConfig{
 	LeaseDuration: 100 * time.Millisecond,
 	RenewDeadline: 80 * time.Millisecond,
 	RenewPeriod:   20 * time.Millisecond,
+	RequestRate:   5,
+	RequestBurst:  10,
+}
+
+// defaultRestConfig is the rest config used to create the leader client.
+var defaultRestConfig = &rest.Config{Host: "https://localhost:6443"}
+
+type newLeaderRunnerParams struct {
+	config  *controller.LeaderConfig
+	restcfg *rest.Config
+	expect  float32
+	error   error
+}
+
+var newLeaderRunnerTestCases = map[string]newLeaderRunnerParams{
+	"success": {
+		config:  defaultLeaderConfig,
+		restcfg: defaultRestConfig,
+		expect:  5,
+	},
+
+	"missing-lock-type": {
+		config: &controller.LeaderConfig{
+			Name: "controller", Namespace: "default",
+			LeaseDuration: 100 * time.Millisecond,
+			RenewDeadline: 80 * time.Millisecond,
+			RenewPeriod:   20 * time.Millisecond,
+			RequestRate:   20, RequestBurst: 40,
+		},
+		restcfg: defaultRestConfig,
+		expect:  20,
+	},
+
+	"invalid-rest-config": {
+		config: defaultLeaderConfig,
+		restcfg: &rest.Config{
+			Host: "https://localhost:6443", ExecProvider: &api.ExecConfig{},
+			AuthProvider: &api.AuthProviderConfig{},
+		},
+		error: controller.ErrController.New(
+			"leader client [name=%s]: %w", "controller",
+			ErrLeaderClient(&rest.Config{
+				Host:         "https://localhost:6443",
+				ExecProvider: &api.ExecConfig{},
+				AuthProvider: &api.AuthProviderConfig{},
+			})),
+	},
+
+	"nil-config": {
+		restcfg: defaultRestConfig,
+		error:   controller.ErrController.New("leader config must not be nil"),
+	},
+}
+
+// ErrLeaderClient creates the client error expected for the given config.
+func ErrLeaderClient(restcfg *rest.Config) error {
+	_, err := kubernetes.NewForConfig(restcfg)
+
+	return err
+}
+
+func TestNewLeaderRunner(t *testing.T) {
+	test.Map(t, newLeaderRunnerTestCases).
+		Run(func(t test.Test, param newLeaderRunnerParams) {
+			// Given
+			restcfg := rest.CopyConfig(param.restcfg)
+
+			// When
+			runner, err := controller.NewLeaderRunner(
+				"host-id", param.config, param.restcfg)
+
+			// Then
+			assert.Equal(t, param.error, err)
+			assert.Equal(t, param.error == nil, runner != nil)
+			assert.Equal(t, restcfg, param.restcfg)
+			if param.error == nil {
+				assert.Equal(t, "leases", param.config.LockType)
+				k8scli := test.Cast[kubernetes.Interface](
+					reflect.NewAccessor(runner).Get("k8scli"))
+				assert.Equal(t, param.expect, k8scli.CoordinationV1().
+					RESTClient().GetRateLimiter().QPS())
+			}
+		})
 }
 
 type defaultRunnerRunParams struct {
@@ -189,15 +276,6 @@ var leaderRunnerRunTestCases = map[string]leaderRunnerRunParams{
 			//lint:ignore ST1005 // matching Kubernetes error message.
 			//nolint:staticcheck // matching Kubernetes error message.
 			errors.New("Lock identity is empty"),
-		),
-	},
-
-	"nil-config-error": {
-		setup: mock.Chain(
-			CallK8sClientCoreV1(true),
-			CallK8sClientCoordinationV1(),
-			test.Panic("runtime error: "+
-				"invalid memory address or nil pointer dereference"),
 		),
 	},
 
@@ -399,8 +477,9 @@ func TestLeaderRunnerRun(t *testing.T) {
 			mocks := mock.NewMocks(t).Expect(param.setup)
 			k8scli := mock.Get(mocks, NewMockK8sClient)
 
-			runner := controller.NewLeaderRunner(
-				param.id, param.config, k8scli)
+			runner := test.Must(controller.NewLeaderRunner(
+				param.id, param.config, defaultRestConfig))
+			reflect.NewAccessor(runner).Set("k8scli", k8scli)
 
 			runnables := make([]controller.Runnable, 0, param.runnables)
 			for range param.runnables {

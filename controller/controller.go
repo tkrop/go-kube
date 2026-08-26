@@ -51,6 +51,17 @@ type Config struct {
 	RateLimiter RateLimiter
 }
 
+// StripManagedFields removes the managed fields from the given resource to
+// reduce the memory consumed by the cache. Resources without object meta,
+// e.g. deletion tombstones, are passed through unchanged.
+func StripManagedFields(obj any) (any, error) {
+	if access, ok := obj.(metav1.ObjectMetaAccessor); ok {
+		access.GetObjectMeta().SetManagedFields(nil)
+	}
+
+	return obj, nil
+}
+
 // Delay defines the delays applied when enqueuing resource events.
 type Delay struct {
 	// Debounce delays the enqueuing of resource events to coalesce repeated
@@ -117,6 +128,11 @@ type Controller[T runtime.Object] interface {
 	// index with the given name. It retrieves no objects, if the index is not
 	// registered via the indexers provided to `New`.
 	ListByIndex(index, value string) []T
+	// SetTransform sets the transformation reducing the resources before they
+	// enter the cache. This is the main lever to limit the memory consumed by
+	// a large cache, e.g. using `StripManagedFields`. It must be called before
+	// the controller is initialized.
+	SetTransform(transform cache.TransformFunc) error
 	// AddHandler will add a new handler with the given name to the controller
 	// that only receives the resource events passing all given filters. The
 	// name is used to distinguish the handler queues in the metrics. Without
@@ -160,6 +176,17 @@ func New[T runtime.Object, L runtime.Object](
 		informer:  informer,
 		processor: []*Processor[T]{},
 	}
+}
+
+// SetTransform sets the transformation reducing the resources before they
+// enter the cache. It must be called before the controller is initialized.
+func (c *controller[T]) SetTransform(transform cache.TransformFunc) error {
+	if err := c.informer.SetTransform(transform); err != nil {
+		return ErrController.New("set transform [name=%s]: %w",
+			c.config.Name, err)
+	}
+
+	return nil
 }
 
 // AddHandler will add a new handler with the given name to the controller

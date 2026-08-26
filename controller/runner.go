@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
@@ -35,6 +36,27 @@ type LeaderConfig struct {
 	// RenewPeriod is the duration the leader elector clients should wait
 	// between tries of actions.
 	RenewPeriod time.Duration `default:"2s"`
+
+	// RequestRate is the request rate allowed by the leader election client.
+	// While the lease renewal is a low volume traffic that must not be
+	// throttled by the resource traffic of the controllers.
+	RequestRate float32 `default:"5"`
+	// RequestBurst is the available request burst of the leader election
+	// client.
+	RequestBurst int `default:"10"`
+}
+
+// restConfig creates a new rest config for the leader election client with
+// the given base config and the leader election configuration. The new config
+// has its request rate and timeout bound to the renew deadline to avoid losing
+// leadership under load.
+func (config *LeaderConfig) restConfig(restcfg *rest.Config) *rest.Config {
+	restcfg = rest.CopyConfig(restcfg)
+	restcfg.QPS = config.RequestRate
+	restcfg.Burst = config.RequestBurst
+	restcfg.Timeout = config.RenewDeadline
+
+	return restcfg
 }
 
 // Runnable is the interface for controller runnables that can be first
@@ -112,19 +134,37 @@ type LeaderRunner struct {
 // using the Kubernetes leader election mechanism. Make sure to use a unique
 // host identifier for each instance of a leader eleaction runner, e.g. by
 // adding a universal unique identifier to the hostname.
+//
+// The runner creates its own Kubernetes client with an isolated request budget
+// and a request timeout bound to the renew deadline. Sharing a client with the
+// resource traffic of the controllers risks losing the leadership under load,
+// since the renewal is throttled by the same rate limiter and may miss the
+// renew deadline.
 func NewLeaderRunner(
-	id string, config *LeaderConfig, k8scli kubernetes.Interface,
-) Runner {
+	id string, config *LeaderConfig, restcfg *rest.Config,
+) (Runner, error) {
+	if config == nil {
+		return nil, ErrController.New("leader config must not be nil")
+	}
+
 	// TODO: check whether we can improve go-config.
-	if config != nil && config.LockType == "" {
+	if config.LockType == "" {
 		config.LockType = "leases"
+	}
+
+	k8scli, err := kubernetes.NewForConfig(config.restConfig(restcfg))
+	if err != nil {
+		// Returning the client would hide the failure behind a non-nil
+		// interface holding a nil client.
+		return nil, ErrController.New("leader client [name=%s]: %w",
+			config.Name, err)
 	}
 
 	return &LeaderRunner{
 		id:     id,
 		config: config,
 		k8scli: k8scli,
-	}
+	}, nil
 }
 
 // Run runs the given set of controllers using the given context and error

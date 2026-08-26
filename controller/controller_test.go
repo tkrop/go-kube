@@ -122,6 +122,59 @@ func CallHandlerNotifyAny() mock.SetupFunc {
 	}
 }
 
+type stripManagedFieldsParams struct {
+	obj    any
+	expect any
+}
+
+var stripManagedFieldsTestCases = map[string]stripManagedFieldsParams{
+	"without-managed-fields": {
+		obj:    pod("strip-pod"),
+		expect: pod("strip-pod"),
+	},
+
+	"with-managed-fields": {
+		obj:    NewManagedPod("strip-pod"),
+		expect: pod("strip-pod"),
+	},
+
+	"without-meta": {
+		obj:    "no-meta",
+		expect: "no-meta",
+	},
+
+	"tombstone": {
+		obj: cache.DeletedFinalStateUnknown{
+			Key: "default/strip-pod", Obj: NewManagedPod("strip-pod"),
+		},
+		expect: cache.DeletedFinalStateUnknown{
+			Key: "default/strip-pod", Obj: NewManagedPod("strip-pod"),
+		},
+	},
+}
+
+// NewManagedPod creates a pod carrying managed fields.
+func NewManagedPod(name string) *corev1.Pod {
+	result := pod(name)
+	result.ManagedFields = []metav1.ManagedFieldsEntry{{
+		Manager: "kubectl", Operation: metav1.ManagedFieldsOperationApply,
+	}}
+
+	return result
+}
+
+func TestStripManagedFields(t *testing.T) {
+	test.Map(t, stripManagedFieldsTestCases).
+		Run(func(t test.Test, param stripManagedFieldsParams) {
+			// When
+			result, err := controller.StripManagedFields(param.obj)
+
+			// Then
+			assert.NoError(t, err)
+			assert.Equal(t, param.expect, result)
+		})
+}
+
 type jitterParams struct {
 	key    string
 	window time.Duration
@@ -489,6 +542,79 @@ func TestControllerAddHandler(t *testing.T) {
 				})
 			}
 			assert.Equal(t, expect, handlerSpecs(ctrl))
+		})
+}
+
+type controllerTransformParams struct {
+	setup     mock.SetupFunc
+	before    func(ctrl controller.Controller[*corev1.Pod])
+	transform cache.TransformFunc
+	obj       any
+	expect    any
+	error     error
+}
+
+var controllerTransformTestCases = map[string]controllerTransformParams{
+	"without-transform": {
+		obj:    NewManagedPod("transform-pod"),
+		expect: NewManagedPod("transform-pod"),
+	},
+
+	"with-transform": {
+		transform: controller.StripManagedFields,
+		obj:       NewManagedPod("transform-pod"),
+		expect:    pod("transform-pod"),
+	},
+
+	"informer-started": {
+		setup: mock.Setup(
+			CallRetrieverWatchEndless[*corev1.PodList](),
+			CallRetrieverList(NewPodList(p1, p2), nil),
+		),
+		before: func(ctrl controller.Controller[*corev1.Pod]) {
+			sigerr := make(chan error, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctrl.Init(ctx, sigerr)
+		},
+		transform: controller.StripManagedFields,
+		obj:       NewManagedPod("transform-pod"),
+		expect:    NewManagedPod("transform-pod"),
+		error: controller.ErrController.New(
+			"set transform [name=%s]: %w", "transform",
+			errors.New("informer has already started").Unwrap()),
+	},
+}
+
+func TestControllerSetTransform(t *testing.T) {
+	test.Map(t, controllerTransformTestCases).
+		Run(func(t test.Test, param controllerTransformParams) {
+			// Given
+			mocks := mock.NewMocks(t).Expect(param.setup)
+			ctrl := controller.New[*corev1.Pod](Config("transform"),
+				mock.Get(mocks, NewMockRetriever[*corev1.PodList]),
+				cache.Indexers{})
+			if param.before != nil {
+				param.before(ctrl)
+			}
+
+			// When
+			var err error
+			if param.transform != nil {
+				err = ctrl.SetTransform(param.transform)
+			}
+
+			// Then
+			assert.Equal(t, param.error, err)
+			informer := test.Cast[cache.SharedIndexInformer](
+				reflect.NewAccessor(ctrl).Get("informer"))
+			transform := test.Cast[cache.TransformFunc](
+				reflect.NewAccessor(informer).Get("transform"))
+			result := param.obj
+			if transform != nil {
+				result = test.Must(transform(param.obj))
+			}
+			assert.Equal(t, param.expect, result)
 		})
 }
 
