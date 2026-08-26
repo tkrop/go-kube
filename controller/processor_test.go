@@ -51,6 +51,13 @@ func CallQueueAdd(key string) mock.SetupFunc {
 	}
 }
 
+func CallQueueAddAfter(key string, delay time.Duration) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
+			AddAfter(gomock.Any(), key, delay)
+	}
+}
+
 func CallQueueRequeue(key string, err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
@@ -157,7 +164,7 @@ func TestNewResourceEventHandler(t *testing.T) {
 
 			// When
 			result := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue)
+				handler, queue, controller.Delay{})
 
 			// Then
 			assert.NotNil(t, result)
@@ -166,6 +173,7 @@ func TestNewResourceEventHandler(t *testing.T) {
 
 type onAddParams struct {
 	setup  mock.SetupFunc
+	delay  controller.Delay
 	filter controller.Filter
 	obj    any
 	isInit bool
@@ -200,6 +208,13 @@ var onAddTestCases = map[string]onAddParams{
 		filter: Pass(false),
 		obj:    pod("test-pod"),
 	},
+
+	"debounce": {
+		setup: mock.Chain(
+			CallQueueAddAfter("default/test-pod", time.Second)),
+		delay: controller.NewDelay(time.Second, 0),
+		obj:   pod("test-pod"),
+	},
 }
 
 func TestOnAdd(t *testing.T) {
@@ -210,7 +225,7 @@ func TestOnAdd(t *testing.T) {
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			queue := mock.Get(mocks, NewMockQueue[string])
 			eventHandler := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue, Filters(param.filter)...)
+				handler, queue, param.delay, Filters(param.filter)...)
 
 			// When
 			eventHandler.OnAdd(param.obj, param.isInit)
@@ -219,6 +234,7 @@ func TestOnAdd(t *testing.T) {
 
 type onUpdateParams struct {
 	setup  mock.SetupFunc
+	delay  controller.Delay
 	filter controller.Filter
 	oldObj any
 	newObj any
@@ -255,6 +271,39 @@ var onUpdateTestCases = map[string]onUpdateParams{
 		oldObj: NewPod(1, "100"),
 		newObj: NewPod(1, "101"),
 	},
+
+	// Re-sync events replay the cached resource with an unchanged resource
+	// version and are therefore spread over the re-sync window.
+	"resync-jitter": {
+		setup: mock.Chain(CallQueueAddAfter("default/pod",
+			controller.NewDelay(0, time.Minute).Jitter("default/pod"))),
+		delay:  controller.NewDelay(0, time.Minute),
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "100"),
+	},
+
+	"resync-debounced": {
+		setup: mock.Chain(
+			CallQueueAddAfter("default/pod", time.Second)),
+		delay:  controller.NewDelay(time.Second, 0),
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "100"),
+	},
+
+	"update-debounced": {
+		setup: mock.Chain(
+			CallQueueAddAfter("default/pod", time.Second)),
+		delay:  controller.NewDelay(time.Second, time.Minute),
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "101"),
+	},
+
+	"resync-without-meta": {
+		setup:  mock.Chain(CallQueueAdd("default/updated-pod")),
+		delay:  controller.NewDelay(0, time.Minute),
+		oldObj: "no-meta",
+		newObj: pod("updated-pod"),
+	},
 }
 
 func TestOnUpdate(t *testing.T) {
@@ -265,7 +314,7 @@ func TestOnUpdate(t *testing.T) {
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			queue := mock.Get(mocks, NewMockQueue[string])
 			eventHandler := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue, Filters(param.filter)...)
+				handler, queue, param.delay, Filters(param.filter)...)
 
 			// When
 			eventHandler.OnUpdate(param.oldObj, param.newObj)
@@ -274,6 +323,7 @@ func TestOnUpdate(t *testing.T) {
 
 type onDeleteParams struct {
 	setup  mock.SetupFunc
+	delay  controller.Delay
 	filter controller.Filter
 	obj    any
 }
@@ -321,7 +371,7 @@ func TestOnDelete(t *testing.T) {
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			queue := mock.Get(mocks, NewMockQueue[string])
 			eventHandler := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue, Filters(param.filter)...)
+				handler, queue, param.delay, Filters(param.filter)...)
 
 			// When
 			eventHandler.OnDelete(param.obj)

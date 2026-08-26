@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -119,6 +120,123 @@ func CallHandlerNotifyAny() mock.SetupFunc {
 			Notify(gomock.Any(), gomock.Any(), gomock.Any()).
 			AnyTimes()
 	}
+}
+
+type jitterParams struct {
+	key    string
+	window time.Duration
+	expect time.Duration
+}
+
+var jitterTestCases = map[string]jitterParams{
+	"zero-window": {
+		key: "default/pod",
+	},
+
+	"negative-window": {
+		key:    "default/pod",
+		window: -time.Minute,
+	},
+
+	"single-nanosecond-window": {
+		key:    "default/pod",
+		window: time.Nanosecond,
+	},
+}
+
+func TestJitter(t *testing.T) {
+	test.Map(t, jitterTestCases).
+		Run(func(t test.Test, param jitterParams) {
+			// Given
+			delay := controller.NewDelay(0, param.window)
+
+			// When
+			result := delay.Jitter(param.key)
+
+			// Then
+			assert.Equal(t, param.expect, result)
+		})
+}
+
+type jitterWindowParams struct {
+	keys   []string
+	window time.Duration
+}
+
+var jitterWindowTestCases = map[string]jitterWindowParams{
+	"minute-window": {
+		keys: []string{
+			"default/pod-1", "default/pod-2", "other/pod-1", "other/pod-2",
+		},
+		window: time.Minute,
+	},
+
+	"millisecond-window": {
+		keys:   []string{"default/pod-1", "default/pod-2"},
+		window: time.Millisecond,
+	},
+}
+
+func TestJitterWindow(t *testing.T) {
+	test.Map(t, jitterWindowTestCases).
+		Run(func(t test.Test, param jitterWindowParams) {
+			// Given
+			delay := controller.NewDelay(0, param.window)
+
+			for _, key := range param.keys {
+				// When
+				offset := delay.Jitter(key)
+
+				// Then
+				assert.GreaterOrEqual(t, offset, time.Duration(0), key)
+				assert.Less(t, offset, param.window, key)
+				assert.Equal(t, offset, delay.Jitter(key), key)
+			}
+		})
+}
+
+type jitterSpreadParams struct {
+	keys    int
+	window  time.Duration
+	buckets int64
+	expect  int
+}
+
+// The offsets must not collapse into a few buckets, since this reproduces the
+// re-sync spike the jitter is supposed to spread.
+var jitterSpreadTestCases = map[string]jitterSpreadParams{
+	"spread-over-minute": {
+		keys:    100,
+		window:  time.Minute,
+		buckets: 10,
+		expect:  10,
+	},
+
+	"spread-over-hour": {
+		keys:    100,
+		window:  time.Hour,
+		buckets: 10,
+		expect:  10,
+	},
+}
+
+func TestJitterSpread(t *testing.T) {
+	test.Map(t, jitterSpreadTestCases).
+		Run(func(t test.Test, param jitterSpreadParams) {
+			// Given
+			delay := controller.NewDelay(0, param.window)
+
+			// When
+			buckets := map[int64]bool{}
+			for index := range param.keys {
+				offset := delay.Jitter(fmt.Sprintf("default/pod-%d", index))
+				buckets[int64(offset)*param.buckets/
+					int64(param.window)] = true
+			}
+
+			// Then
+			assert.Len(t, buckets, param.expect)
+		})
 }
 
 // TODO: integrate with tests.

@@ -17,20 +17,23 @@ var ErrPanic = errors.New("panic")
 type ResourceEventHandler[T runtime.Object] struct {
 	handler Handler[T]
 	queue   Queue[string]
+	delay   Delay
 	filter  Filter
 }
 
 // NewResourceEventHandler creates a new event handler only enqueuing the
-// resource events passing all given filters. Without filters all events are
-// enqueued.
+// resource events passing all given filters using the given delays. Without
+// filters all events are enqueued.
 func NewResourceEventHandler[T runtime.Object](
 	handler Handler[T],
 	queue Queue[string],
+	delay Delay,
 	filter ...Filter,
 ) *ResourceEventHandler[T] {
 	return &ResourceEventHandler[T]{
 		handler: handler,
 		queue:   queue,
+		delay:   delay,
 		filter:  combine(filter),
 	}
 }
@@ -62,7 +65,7 @@ func (r *ResourceEventHandler[T]) OnDelete(obj any) {
 }
 
 // enqueue adds the key of the given object to the queue, if the event passes
-// the configured filter.
+// the configured filter, applying the configured delay.
 func (r *ResourceEventHandler[T]) enqueue(
 	op Op, prev, obj any, keyfn cache.KeyFunc,
 ) {
@@ -75,11 +78,30 @@ func (r *ResourceEventHandler[T]) enqueue(
 		return
 	}
 
-	if r.filter != nil && !r.filter(op, object(prev), object(obj)) {
+	before, after := object(prev), object(obj)
+	if r.filter != nil && !r.filter(op, before, after) {
+		return
+	}
+
+	if delay := r.delay.delay(key,
+		op == OpUpdate && resync(before, after)); delay > 0 {
+		r.queue.AddAfter(ctx, key, delay)
+
 		return
 	}
 
 	r.queue.Add(ctx, key)
+}
+
+// resync checks whether the given update event was created by the periodic
+// re-sync replaying the cached resources without any change.
+func resync(prev, obj runtime.Object) bool {
+	before, after := meta(prev), meta(obj)
+	if before == nil || after == nil {
+		return false
+	}
+
+	return before.GetResourceVersion() == after.GetResourceVersion()
 }
 
 // object converts the given event object into a resource object. It returns

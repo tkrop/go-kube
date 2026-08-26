@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tkrop/go-testing/mock"
@@ -18,6 +19,7 @@ import (
 type queueOp struct {
 	op    string
 	item  string
+	delay time.Duration
 	check func(test.Test, controller.Queue[string], error)
 }
 
@@ -253,6 +255,44 @@ var retryQueueTestCases = map[string]retryQueueParams{
 			}},
 		},
 	},
+
+	"add-after": {
+		ops: []queueOp{
+			{op: "addafter", item: "item1", delay: time.Millisecond},
+			{op: "get", item: "item1"},
+			{op: "done", item: "item1"},
+		},
+	},
+
+	"add-after-zero": {
+		ops: []queueOp{
+			{op: "addafter", item: "item1"},
+			{op: "len", check: func(
+				t test.Test, q controller.Queue[string], _ error,
+			) {
+				assert.Equal(t, 1, q.Len(context.Background()))
+			}},
+			{op: "get", item: "item1"},
+			{op: "done", item: "item1"},
+		},
+	},
+
+	// The delaying queue keeps the earliest deadline of an item, so repeated
+	// calls for a hot item coalesce into a single reconcile.
+	"add-after-coalesced": {
+		ops: []queueOp{
+			{op: "addafter", item: "item1", delay: 50 * time.Millisecond},
+			{op: "addafter", item: "item1", delay: 100 * time.Millisecond},
+			{op: "addafter", item: "item1", delay: 200 * time.Millisecond},
+			{op: "get", item: "item1"},
+			{op: "done", item: "item1"},
+			{op: "len", check: func(
+				t test.Test, q controller.Queue[string], _ error,
+			) {
+				assert.Equal(t, 0, q.Len(context.Background()))
+			}},
+		},
+	},
 }
 
 //nolint:gocognit // TODO: improve test design.
@@ -271,6 +311,8 @@ func TestRetryQueue(t *testing.T) {
 				switch op.op {
 				case "add":
 					queue.Add(ctx, op.item)
+				case "addafter":
+					queue.AddAfter(ctx, op.item, op.delay)
 				case "get":
 					item, shutdown := queue.Get(ctx)
 					if op.check != nil {
@@ -346,6 +388,25 @@ var monitorQueueTestCases = map[string]monitorQueueParams{
 			{op: "done", item: "item1"},
 		},
 	},
+
+	"add-after": {
+		ops: []queueOp{
+			{op: "addafter", item: "item1", delay: time.Millisecond},
+			{op: "get", item: "item1"},
+			{op: "done", item: "item1"},
+		},
+	},
+
+	// The queue time is measured from the first enqueuing, so the coalesced
+	// calls only report a single get event.
+	"add-after-coalesced": {
+		ops: []queueOp{
+			{op: "addafter", item: "item1", delay: 50 * time.Millisecond},
+			{op: "addafter", item: "item1", delay: 100 * time.Millisecond},
+			{op: "get", item: "item1"},
+			{op: "done", item: "item1"},
+		},
+	},
 }
 
 func TestMonitorQueue(t *testing.T) {
@@ -368,6 +429,9 @@ func TestMonitorQueue(t *testing.T) {
 				case "add":
 					recorder.EXPECT().AddEvent(
 						gomock.Any(), "test-queue", false).Times(1)
+				case "addafter":
+					recorder.EXPECT().AddEvent(
+						gomock.Any(), "test-queue", false).Times(1)
 				case "requeue":
 					recorder.EXPECT().AddEvent(
 						gomock.Any(), "test-queue", true).Times(1)
@@ -387,6 +451,8 @@ func TestMonitorQueue(t *testing.T) {
 				switch op.op {
 				case "add":
 					queue.Add(ctx, op.item)
+				case "addafter":
+					queue.AddAfter(ctx, op.item, op.delay)
 				case "get":
 					item, shutdown := queue.Get(ctx)
 					if op.item != "" {

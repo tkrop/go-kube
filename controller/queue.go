@@ -27,6 +27,10 @@ type Queue[T comparable] interface {
 	Len(ctx context.Context) int
 	// Add will add an item to the queue.
 	Add(ctx context.Context, item T)
+	// AddAfter will add an item to the queue after the given delay. Repeated
+	// calls for an item keep the earliest deadline, i.e. the items are
+	// coalesced on the leading edge.
+	AddAfter(ctx context.Context, item T, delay time.Duration)
 	// Requeue will add an item to the queue in a requeue mode. If will
 	// return an error if an item has reached max requeue attempts.
 	Requeue(ctx context.Context, item T) error
@@ -103,6 +107,14 @@ func (q *RetryQueue[T]) Add(_ context.Context, item T) {
 	q.queue.Add(item)
 }
 
+// AddAfter will add an item to the queue after the given delay. Repeated
+// calls for an item keep the earliest deadline.
+func (q *RetryQueue[T]) AddAfter(
+	_ context.Context, item T, delay time.Duration,
+) {
+	q.queue.AddAfter(item, delay)
+}
+
 // Requeue re-adds the given item to the queue if the max retries has not been
 // reached yet. A negative number of retries requeues the item indefinitely.
 func (q *RetryQueue[T]) Requeue(_ context.Context, item T) error {
@@ -164,6 +176,17 @@ func (q *MonitorQueue[T]) Add(ctx context.Context, item T) {
 	q.time.LoadOrStore(item, time.Now())
 	q.mrec.AddEvent(ctx, q.Name(), false)
 	q.Queue.Add(ctx, item)
+}
+
+// AddAfter will add an item to the queue after the given delay. The queue
+// time is measured from the first enqueuing to match the earliest deadline
+// kept by the delaying queue.
+func (q *MonitorQueue[T]) AddAfter(
+	ctx context.Context, item T, delay time.Duration,
+) {
+	q.time.LoadOrStore(item, time.Now())
+	q.mrec.AddEvent(ctx, q.Name(), false)
+	q.Queue.AddAfter(ctx, item, delay)
 }
 
 // Requeue re-adds the given item to the queue in requeue mode.

@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"hash/fnv"
+	"math"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,11 +41,63 @@ type Config struct {
 	// the event is dropped and recovery depends on the next resource event or
 	// re-sync.
 	Retries int
+	// Delay defines the delays applied when enqueuing resource events to
+	// coalesce repeated events and to spread the periodic re-sync.
+	Delay Delay
 	// RateLimiter creates the back-off strategy used to delay requeued events.
 	// It is called once per handler to avoid sharing back-off state between
 	// queues. If unset, `workqueue.DefaultTypedControllerRateLimiter` is used,
 	// that starts at a 5ms delay doubling it up to 1000s.
 	RateLimiter RateLimiter
+}
+
+// Delay defines the delays applied when enqueuing resource events.
+type Delay struct {
+	// Debounce delays the enqueuing of resource events to coalesce repeated
+	// events of the same resource into a single reconcile. The delaying queue
+	// keeps the earliest deadline of a resource, i.e. the events are coalesced
+	// on the leading edge. Zero enqueues the events immediately.
+	Debounce time.Duration
+	// Resync spreads the enqueuing of the resource events created by the
+	// periodic re-sync over the given window using a stable per resource
+	// jitter. This avoids the reconcile spike created by replaying the whole
+	// cache at once. Zero falls back to the debounce delay.
+	Resync time.Duration
+}
+
+// NewDelay creates the delays applied when enqueuing resource events using
+// the given debounce delay and re-sync window.
+func NewDelay(debounce, resync time.Duration) Delay {
+	return Delay{
+		Debounce: debounce,
+		Resync:   resync,
+	}
+}
+
+// Jitter returns a stable offset within the re-sync window derived from the
+// given resource key. Deriving the offset from the key spreads the resources
+// evenly over the window while keeping the offset of a resource reproducible.
+func (d Delay) Jitter(key string) time.Duration {
+	if d.Resync <= 0 {
+		return 0
+	}
+
+	hash := fnv.New64a()
+	// Writing to a hash never fails.
+	_, _ = hash.Write([]byte(key))
+
+	// Masking the sign bit keeps the offset positive.
+	return time.Duration(hash.Sum64()&math.MaxInt64) % d.Resync
+}
+
+// delay returns the delay applied when enqueuing the event of the resource
+// with the given key.
+func (d Delay) delay(key string, resync bool) time.Duration {
+	if resync && d.Resync > 0 {
+		return d.Jitter(key)
+	}
+
+	return d.Debounce
 }
 
 // Controller is the interface for managing the controller and accessing
@@ -125,7 +179,7 @@ func (c *controller[T]) AddHandler(
 		c.config.Retries, recorder)
 
 	if err := c.addHandler(name, NewResourceEventHandler[T](
-		handler, queue, filter...)); err != nil {
+		handler, queue, c.config.Delay, filter...)); err != nil {
 		return err
 	}
 
