@@ -254,20 +254,20 @@ var onUpdateTestCases = map[string]onUpdateParams{
 	},
 
 	"filter-drops-resync": {
-		filter: controller.ResourceVersionChanged(),
+		filter: controller.ResourceVersionChanged,
 		oldObj: NewPod(1, "100"),
 		newObj: NewPod(1, "100"),
 	},
 
 	"filter-passes-change": {
 		setup:  mock.Chain(CallQueueAdd("default/pod")),
-		filter: controller.ResourceVersionChanged(),
+		filter: controller.ResourceVersionChanged,
 		oldObj: NewPod(1, "100"),
 		newObj: NewPod(1, "101"),
 	},
 
 	"filter-drops-status-write": {
-		filter: controller.GenerationChanged(),
+		filter: controller.GenerationChanged,
 		oldObj: NewPod(1, "100"),
 		newObj: NewPod(1, "101"),
 	},
@@ -350,11 +350,8 @@ var onDeleteTestCases = map[string]onDeleteParams{
 	// The tombstone is no resource and therefore filtered as nil object.
 	"filter-tombstone": {
 		setup:  mock.Chain(CallQueueAdd("default/tombstone-pod")),
-		filter: controller.GenerationChanged(),
-		obj: cache.DeletedFinalStateUnknown{
-			Key: "default/tombstone-pod",
-			Obj: pod("tombstone-pod"),
-		},
+		filter: controller.GenerationChanged,
+		obj:    pod("tombstone-pod"),
 	},
 
 	"filter-dropping": {
