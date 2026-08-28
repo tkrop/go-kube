@@ -2,10 +2,13 @@ package controller
 
 import (
 	"context"
+	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/client-go/tools/metrics"
 )
 
 // Recorder knows how to record queue metrics.
@@ -152,4 +155,114 @@ func (r *DefaultRecorder) RegisterLen(
 		},
 		func() float64 { return float64(call(context.Background())) },
 	))
+}
+
+// clientMetrics ensures that the global client-go metric providers are only
+// installed once per process.
+var clientMetrics sync.Once
+
+// RegisterClientMetrics registers the request metrics of the Kubernetes
+// client with the given registerer. Without them the client side throttling
+// that limits the resource traffic is invisible. The work queue metrics are
+// not registered, since the queues are already observed via the `Recorder`.
+//
+// The metric providers of the Kubernetes client are global and can only be
+// installed once per process - repeated calls fail.
+func RegisterClientMetrics(
+	config RecorderConfig, reg prometheus.Registerer,
+) error {
+	err := ErrController.New("client metrics already registered")
+	clientMetrics.Do(func() {
+		registerClientMetrics(config, reg)
+		err = nil
+	})
+
+	return err
+}
+
+// registerClientMetrics creates and installs the client request metrics.
+func registerClientMetrics(
+	config RecorderConfig, reg prometheus.Registerer,
+) {
+	config.defaults()
+
+	request := clientLatency(config, "request_duration",
+		"Duration of a request to the API server.")
+	throttle := clientLatency(config, "throttle_duration",
+		"Duration a request is delayed by the client side rate limiter.")
+	result := clientResult(config, "requests_total",
+		"Total number of requests to the API server.")
+	retry := clientResult(config, "retries_total",
+		"Total number of requests retried against the API server.")
+
+	reg.MustRegister(request.metric, throttle.metric,
+		result.metric, retry.metric)
+
+	metrics.Register(metrics.RegisterOpts{
+		RequestLatency:     request,
+		RateLimiterLatency: throttle,
+		RequestResult:      result,
+		RequestRetry:       retry,
+	})
+}
+
+// clientLatency creates a latency metric for the Kubernetes client.
+func clientLatency(
+	config RecorderConfig, name, help string,
+) *latencyMetric {
+	return &latencyMetric{
+		metric: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: config.Namespace,
+			Subsystem: config.Subsystem,
+			Name:      name,
+			Help:      help,
+			Buckets:   config.ProcessBuckets,
+		}, []string{"verb", "host"}),
+	}
+}
+
+// clientResult creates a result metric for the Kubernetes client.
+func clientResult(
+	config RecorderConfig, name, help string,
+) *resultMetric {
+	return &resultMetric{
+		metric: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: config.Namespace,
+			Subsystem: config.Subsystem,
+			Name:      name,
+			Help:      help,
+		}, []string{"code", "method", "host"}),
+	}
+}
+
+// latencyMetric adapts a histogram to the client latency metric interface.
+type latencyMetric struct {
+	metric *prometheus.HistogramVec
+}
+
+// Observe records the latency of a request with given verb and url.
+func (m *latencyMetric) Observe(
+	_ context.Context, verb string, url url.URL, latency time.Duration,
+) {
+	m.metric.WithLabelValues(verb, url.Host).Observe(latency.Seconds())
+}
+
+// resultMetric adapts a counter to the client result and retry metric
+// interfaces. Each instance is installed for a single role.
+type resultMetric struct {
+	metric *prometheus.CounterVec
+}
+
+// Increment counts a request result with given code, method, and host.
+func (m *resultMetric) Increment(
+	_ context.Context, code, method, host string,
+) {
+	m.metric.WithLabelValues(code, method, host).Inc()
+}
+
+// IncrementRetry counts a request retry with given code, method, and host.
+func (m *resultMetric) IncrementRetry(
+	_ context.Context, code, method, host string,
+) {
+	m.metric.WithLabelValues(code, method, host).Inc()
 }

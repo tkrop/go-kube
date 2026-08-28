@@ -106,8 +106,19 @@ func GetIndexer(mocks *mock.Mocks, indexer cache.Indexer) cache.Indexer {
 
 // NewIndexer creates an indexer populated with elements.
 func NewIndexer(items ...any) cache.Indexer {
-	indexer := cache.NewIndexer(
-		cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	return NewIndexerWith(cache.Indexers{}, items...)
+}
+
+// NewOwnerIndexer creates an indexer with the owner indexers registered
+// populated with elements.
+func NewOwnerIndexer(items ...any) cache.Indexer {
+	return NewIndexerWith(controller.OwnerIndexers(), items...)
+}
+
+// NewIndexerWith creates an indexer with the given indexers populated with
+// elements.
+func NewIndexerWith(indexers cache.Indexers, items ...any) cache.Indexer {
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, indexers)
 	for index, item := range items {
 		if err := indexer.Add(item); err != nil {
 			panic(fmt.Errorf("indexer add [%d=%v]: %w",

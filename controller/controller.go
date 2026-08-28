@@ -2,12 +2,15 @@ package controller
 
 import (
 	"context"
+	"hash/fnv"
+	"math"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tkrop/go-kube/errors"
@@ -16,19 +19,96 @@ import (
 // ErrController is an operator error.
 var ErrController = errors.New("controller")
 
-// Config is the controller configuration.
+// RateLimiter creates the back-off strategy used to delay requeued events.
+type RateLimiter func() workqueue.TypedRateLimiter[string]
+
+// Config is the controller configuration. The values are used as provided -
+// defaults are supposed to be supplied by the config setup of the consumer.
 type Config struct {
 	// Name of the main controller resource.
 	Name string
 	// Workers is the number of concurrent workers the controller will run
-	// processing events.
+	// processing events. Values below one start no workers and thereby only
+	// cache the resources without processing events.
 	Workers int
 	// Sync is the interval in which the controller will process a re-capture
-	// of the selected resources from the API server.
+	// of the selected resources from the API server. Zero disables the
+	// periodic re-sync.
 	Sync time.Duration
-	// Retries is the number of times the controller will try to process an
-	// resource event before returning a real error.
+	// Retries is the number of times the controller retries processing of an
+	// event after a failure. Zero drops the event on the first failure, while
+	// a negative value retries indefinitely. Once the retries are exhausted
+	// the event is dropped and recovery depends on the next resource event or
+	// re-sync.
 	Retries int
+	// Delay defines the delays applied when enqueuing resource events to
+	// coalesce repeated events and to spread the periodic re-sync.
+	Delay Delay
+	// RateLimiter creates the back-off strategy used to delay requeued events.
+	// It is called once per handler to avoid sharing back-off state between
+	// queues. If unset, `workqueue.DefaultTypedControllerRateLimiter` is used,
+	// that starts at a 5ms delay doubling it up to 1000s.
+	RateLimiter RateLimiter
+}
+
+// StripManagedFields removes the managed fields from the given resource to
+// reduce the memory consumed by the cache. Resources without object meta,
+// e.g. deletion tombstones, are passed through unchanged.
+func StripManagedFields(obj any) (any, error) {
+	if access, ok := obj.(metav1.ObjectMetaAccessor); ok {
+		access.GetObjectMeta().SetManagedFields(nil)
+	}
+
+	return obj, nil
+}
+
+// Delay defines the delays applied when enqueuing resource events.
+type Delay struct {
+	// Debounce delays the enqueuing of resource events to coalesce repeated
+	// events of the same resource into a single reconcile. The delaying queue
+	// keeps the earliest deadline of a resource, i.e. the events are coalesced
+	// on the leading edge. Zero enqueues the events immediately.
+	Debounce time.Duration
+	// Resync spreads the enqueuing of the resource events created by the
+	// periodic re-sync over the given window using a stable per resource
+	// jitter. This avoids the reconcile spike created by replaying the whole
+	// cache at once. Zero falls back to the debounce delay.
+	Resync time.Duration
+}
+
+// NewDelay creates the delays applied when enqueuing resource events using
+// the given debounce delay and re-sync window.
+func NewDelay(debounce, resync time.Duration) Delay {
+	return Delay{
+		Debounce: debounce,
+		Resync:   resync,
+	}
+}
+
+// Jitter returns a stable offset within the re-sync window derived from the
+// given resource key. Deriving the offset from the key spreads the resources
+// evenly over the window while keeping the offset of a resource reproducible.
+func (d Delay) Jitter(key string) time.Duration {
+	if d.Resync <= 0 {
+		return 0
+	}
+
+	hash := fnv.New64a()
+	// Writing to a hash never fails.
+	_, _ = hash.Write([]byte(key))
+
+	// Masking the sign bit keeps the offset positive.
+	return time.Duration(hash.Sum64()&math.MaxInt64) % d.Resync
+}
+
+// delay returns the delay applied when enqueuing the event of the resource
+// with the given key.
+func (d Delay) delay(key string, resync bool) time.Duration {
+	if resync && d.Resync > 0 {
+		return d.Jitter(key)
+	}
+
+	return d.Debounce
 }
 
 // Controller is the interface for managing the controller and accessing
@@ -44,8 +124,22 @@ type Controller[T runtime.Object] interface {
 	// considered. If the namespace, name, and uid are empty, all objects are
 	// returned.
 	List(namespace, name string, uid types.UID) []T
-	// AddHandler will add a new handler to the controller.
-	AddHandler(handler Handler[T], recorder Recorder) error
+	// ListByIndex retrieves all objects stored under the given value in the
+	// index with the given name. It retrieves no objects, if the index is not
+	// registered via the indexers provided to `New`.
+	ListByIndex(index, value string) []T
+	// SetTransform sets the transformation reducing the resources before they
+	// enter the cache. This is the main lever to limit the memory consumed by
+	// a large cache, e.g. using `StripManagedFields`. It must be called before
+	// the controller is initialized.
+	SetTransform(transform cache.TransformFunc) error
+	// AddHandler will add a new handler with the given name to the controller
+	// that only receives the resource events passing all given filters. The
+	// name is used to distinguish the handler queues in the metrics. Without
+	// filters all events are enqueued.
+	AddHandler(
+		name string, handler Handler[T], recorder Recorder, filter ...Filter,
+	) error
 }
 
 // controller is the implementation of the cache interface.
@@ -61,7 +155,9 @@ type controller[T runtime.Object] struct {
 }
 
 // New creates a new controller for given retriever using given configuration
-// and indexers.
+// and indexers. To narrow the observed resources by label or field selectors,
+// wrap the retriever using `NewFilterRetriever`. To look up resources by
+// owner without scanning the whole cache, register the `OwnerIndexers`.
 func New[T runtime.Object, L runtime.Object](
 	config *Config, retriever Retriever[L], indexers cache.Indexers,
 ) Controller[T] {
@@ -82,14 +178,35 @@ func New[T runtime.Object, L runtime.Object](
 	}
 }
 
-// AddHandler will add a new handler to the controller.
-func (c *controller[T]) AddHandler(
-	handler Handler[T], recorder Recorder,
-) error {
-	queue := NewDefaultQueue(c.config.Name, c.config.Retries, recorder)
+// SetTransform sets the transformation reducing the resources before they
+// enter the cache. It must be called before the controller is initialized.
+func (c *controller[T]) SetTransform(transform cache.TransformFunc) error {
+	if err := c.informer.SetTransform(transform); err != nil {
+		return ErrController.New("set transform [name=%s]: %w",
+			c.config.Name, err)
+	}
 
-	if err := c.addHandler(
-		NewResourceEventHandler[T](handler, queue)); err != nil {
+	return nil
+}
+
+// AddHandler will add a new handler with the given name to the controller
+// that only receives the resource events passing all given filters. The name
+// is used to distinguish the handler queues in the metrics. Without filters
+// all events are enqueued.
+func (c *controller[T]) AddHandler(
+	name string, handler Handler[T], recorder Recorder, filter ...Filter,
+) error {
+	// TODO: check whether we can simplify the rate limiter creation?
+	limiter := c.config.RateLimiter
+	if limiter == nil {
+		limiter = workqueue.DefaultTypedControllerRateLimiter[string]
+	}
+
+	queue := NewRateLimitedQueue(name, limiter(),
+		c.config.Retries, recorder)
+
+	if err := c.addHandler(name, NewResourceEventHandler[T](
+		handler, queue, c.config.Delay, filter...)); err != nil {
 		return err
 	}
 
@@ -100,14 +217,16 @@ func (c *controller[T]) AddHandler(
 }
 
 // addHandler adds the given resource event handler to the informer.
-func (c *controller[T]) addHandler(handler *ResourceEventHandler[T]) error {
-	c.handler = append(c.handler, handler)
-
+func (c *controller[T]) addHandler(
+	name string, handler *ResourceEventHandler[T],
+) error {
 	if _, err := c.informer.AddEventHandlerWithResyncPeriod(
 		handler, c.config.Sync); err != nil {
-		return ErrController.New("event handler [name=%s] %w",
-			c.config.Name, err)
+		return ErrController.New("event handler [name=%s, handler=%s] %w",
+			c.config.Name, name, err)
 	}
+
+	c.handler = append(c.handler, handler)
 
 	return nil
 }
@@ -153,8 +272,9 @@ func (c *controller[T]) Get(key string) (T, error) {
 // considered. If the namespace, name, and uid are empty, all objects are
 // returned.
 func (c *controller[T]) List(namespace, name string, uid types.UID) []T {
-	results := []T{}
-	for _, value := range c.informer.GetIndexer().List() {
+	values := c.lookup(name, uid)
+	results := make([]T, 0, len(values))
+	for _, value := range values {
 		if result, ok := value.(T); ok &&
 			c.owner(namespace, name, uid, result) {
 			results = append(results, result)
@@ -168,6 +288,49 @@ func (c *controller[T]) List(namespace, name string, uid types.UID) []T {
 			"uid":       uid,
 			"results":   len(results),
 		}).Tracef("listing %s", c.config.Name)
+	}
+
+	return results
+}
+
+// lookup collects the candidate objects for the owner with the given object
+// name and uid using the most selective owner index registered via the
+// indexers provided to `New`. It falls back to scanning the whole cache, if
+// no suitable index is registered.
+func (c *controller[T]) lookup(name string, uid types.UID) []any {
+	indexer := c.informer.GetIndexer()
+
+	if uid != "" {
+		if values, err := indexer.ByIndex(
+			IndexOwnerUID, string(uid)); err == nil {
+			return values
+		}
+	}
+
+	if name != "" {
+		if values, err := indexer.ByIndex(
+			IndexOwnerName, name); err == nil {
+			return values
+		}
+	}
+
+	return indexer.List()
+}
+
+// ListByIndex retrieves all objects stored under the given value in the index
+// with the given name. It retrieves no objects, if the index is not registered
+// via the indexers provided to `New`.
+func (c *controller[T]) ListByIndex(index, value string) []T {
+	values, err := c.informer.GetIndexer().ByIndex(index, value)
+	if err != nil {
+		return []T{}
+	}
+
+	results := make([]T, 0, len(values))
+	for _, value := range values {
+		if result, ok := value.(T); ok {
+			results = append(results, result)
+		}
 	}
 
 	return results

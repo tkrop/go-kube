@@ -3,6 +3,7 @@ package controller_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -22,6 +23,7 @@ var (
 	testOptions = metav1.ListOptions{LabelSelector: "test=true"}
 	testObject  = &Object{ObjectMeta: metav1.ObjectMeta{Name: "test"}}
 	testList    = NewList(testObject)
+	now         = time.Now()
 )
 
 func GetNilResourceFunc() func(
@@ -32,55 +34,50 @@ func GetNilResourceFunc() func(
 	}
 }
 
-func GetHandleNoop() func(ctx context.Context, obj *List) error {
-	return func(_ context.Context, _ *List) error {
-		return nil
-	}
-}
-
-func GetHandleError() func(ctx context.Context, obj *List) error {
-	return func(_ context.Context, _ *List) error {
-		return assert.AnError
-	}
-}
-
-func GetHandleValid() func(_ context.Context, obj *List) error {
-	return func(_ context.Context, obj *List) error {
-		if obj == nil {
-			return assert.AnError
-		}
-
-		return nil
+func GetHandle(
+	next *time.Time, err error,
+) func(
+	_ context.Context, _ *List,
+) (*time.Time, error) {
+	return func(_ context.Context, _ *List) (*time.Time, error) {
+		return next, err
 	}
 }
 
 type handlerHandleParams struct {
 	setup  mock.SetupFunc
 	obj    runtime.Object
-	handle func(ctx context.Context, obj *List) error
+	handle func(ctx context.Context, obj *List) (*time.Time, error)
+	next   *time.Time
 	error  error
 }
 
 var handlerHandleTestCases = map[string]handlerHandleParams{
 	"success": {
 		obj:    testList,
-		handle: GetHandleNoop(),
+		handle: GetHandle(nil, nil),
 	},
 
 	"success-with-handler": {
 		obj:    testList,
-		handle: GetHandleValid(),
+		handle: GetHandle(nil, nil),
 	},
 
 	"handler-error": {
 		obj:    testList,
-		handle: GetHandleError(),
+		handle: GetHandle(nil, assert.AnError),
 		error:  assert.AnError,
+	},
+
+	"scheduled": {
+		obj:    testList,
+		handle: GetHandle(&now, nil),
+		next:   &now,
 	},
 
 	"invalid-type": {
 		obj:    &Object{ObjectMeta: metav1.ObjectMeta{Name: "wrong"}},
-		handle: GetHandleNoop(),
+		handle: GetHandle(nil, nil),
 		error: errTest.New("invalid type [type=%T]",
 			&Object{ObjectMeta: metav1.ObjectMeta{Name: "wrong"}}),
 	},
@@ -94,9 +91,10 @@ func TestHandlerHandle(t *testing.T) {
 			handler := controller.NewHandler(param.handle, errTest)
 
 			// When
-			err := handler.Handle(ctx, param.obj)
+			next, err := handler.Handle(ctx, param.obj)
 
 			// Then
+			assert.Equal(t, param.next, next)
 			assert.Equal(t, param.error, err)
 		})
 }
@@ -132,7 +130,7 @@ func TestHandlerNotify(t *testing.T) {
 	test.Map(t, handlerNotifyTestCases).
 		Run(func(_ test.Test, param handlerNotifyParams) {
 			// Given
-			handler := controller.NewHandler(GetHandleNoop(), errTest)
+			handler := controller.NewHandler(GetHandle(nil, nil), errTest)
 
 			// When
 			handler.Notify(ctx, param.msg, param.error)

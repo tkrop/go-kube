@@ -13,11 +13,15 @@ import (
 	"go.uber.org/mock/gomock"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tkrop/go-testing/mock"
+	"github.com/tkrop/go-testing/reflect"
 	"github.com/tkrop/go-testing/test"
 
 	"github.com/tkrop/go-kube/controller"
 )
+
+// TODO: this is an AI generated test that needs to be reviewed and improved.
 
 func pod(name string) *corev1.Pod {
 	return &corev1.Pod{
@@ -49,6 +53,20 @@ func CallQueueAdd(key string) mock.SetupFunc {
 	}
 }
 
+func CallQueueAddAfter(key string, delay time.Duration) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
+			AddAfter(gomock.Any(), key, delay)
+	}
+}
+
+func CallQueueAddAfterAnyDelay(key string) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
+			AddAfter(gomock.Any(), key, gomock.Any())
+	}
+}
+
 func CallQueueRequeue(key string, err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
@@ -60,6 +78,13 @@ func CallQueueDone(key string) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
 			Done(gomock.Any(), key)
+	}
+}
+
+func CallQueueForget(key string) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
+			Forget(gomock.Any(), key)
 	}
 }
 
@@ -96,12 +121,18 @@ func CallRecorderDoneEventAny(
 }
 
 func CallHandlerHandle(
-	obj runtime.Object, err error,
+	obj runtime.Object, next *time.Time, err error,
 ) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
-			Handle(gomock.Any(), obj).Return(err)
+			Handle(gomock.Any(), obj).Return(next, err)
 	}
+}
+
+func CallHandlerHandleScheduled(
+	obj runtime.Object, next time.Time,
+) mock.SetupFunc {
+	return CallHandlerHandle(obj, &next, nil)
 }
 
 func CallHandlerHandlePanic(
@@ -148,7 +179,7 @@ func TestNewResourceEventHandler(t *testing.T) {
 
 			// When
 			result := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue)
+				handler, queue, controller.Delay{})
 
 			// Then
 			assert.NotNil(t, result)
@@ -157,6 +188,8 @@ func TestNewResourceEventHandler(t *testing.T) {
 
 type onAddParams struct {
 	setup  mock.SetupFunc
+	delay  controller.Delay
+	filter controller.Filter
 	obj    any
 	isInit bool
 }
@@ -179,6 +212,24 @@ var onAddTestCases = map[string]onAddParams{
 		obj:    pod("init-pod"),
 		isInit: true,
 	},
+
+	"filter-passing": {
+		setup:  mock.Chain(CallQueueAdd("default/test-pod")),
+		filter: Pass(true),
+		obj:    pod("test-pod"),
+	},
+
+	"filter-dropping": {
+		filter: Pass(false),
+		obj:    pod("test-pod"),
+	},
+
+	"debounce": {
+		setup: mock.Chain(
+			CallQueueAddAfter("default/test-pod", time.Second)),
+		delay: controller.NewDelay(time.Second, 0),
+		obj:   pod("test-pod"),
+	},
 }
 
 func TestOnAdd(t *testing.T) {
@@ -189,7 +240,7 @@ func TestOnAdd(t *testing.T) {
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			queue := mock.Get(mocks, NewMockQueue[string])
 			eventHandler := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue)
+				handler, queue, param.delay, Filters(param.filter)...)
 
 			// When
 			eventHandler.OnAdd(param.obj, param.isInit)
@@ -198,6 +249,8 @@ func TestOnAdd(t *testing.T) {
 
 type onUpdateParams struct {
 	setup  mock.SetupFunc
+	delay  controller.Delay
+	filter controller.Filter
 	oldObj any
 	newObj any
 }
@@ -214,6 +267,58 @@ var onUpdateTestCases = map[string]onUpdateParams{
 		oldObj: pod("old-pod"),
 		newObj: "invalid",
 	},
+
+	"filter-drops-resync": {
+		filter: controller.ResourceVersionChanged,
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "100"),
+	},
+
+	"filter-passes-change": {
+		setup:  mock.Chain(CallQueueAdd("default/pod")),
+		filter: controller.ResourceVersionChanged,
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "101"),
+	},
+
+	"filter-drops-status-write": {
+		filter: controller.GenerationChanged,
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "101"),
+	},
+
+	// Re-sync events replay the cached resource with an unchanged resource
+	// version and are therefore spread over the re-sync window.
+	"resync-jitter": {
+		setup: mock.Chain(CallQueueAddAfter("default/pod",
+			controller.NewDelay(0, time.Minute).Jitter("default/pod"))),
+		delay:  controller.NewDelay(0, time.Minute),
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "100"),
+	},
+
+	"resync-debounced": {
+		setup: mock.Chain(
+			CallQueueAddAfter("default/pod", time.Second)),
+		delay:  controller.NewDelay(time.Second, 0),
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "100"),
+	},
+
+	"update-debounced": {
+		setup: mock.Chain(
+			CallQueueAddAfter("default/pod", time.Second)),
+		delay:  controller.NewDelay(time.Second, time.Minute),
+		oldObj: NewPod(1, "100"),
+		newObj: NewPod(1, "101"),
+	},
+
+	"resync-without-meta": {
+		setup:  mock.Chain(CallQueueAdd("default/updated-pod")),
+		delay:  controller.NewDelay(0, time.Minute),
+		oldObj: "no-meta",
+		newObj: pod("updated-pod"),
+	},
 }
 
 func TestOnUpdate(t *testing.T) {
@@ -224,7 +329,7 @@ func TestOnUpdate(t *testing.T) {
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			queue := mock.Get(mocks, NewMockQueue[string])
 			eventHandler := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue)
+				handler, queue, param.delay, Filters(param.filter)...)
 
 			// When
 			eventHandler.OnUpdate(param.oldObj, param.newObj)
@@ -232,27 +337,36 @@ func TestOnUpdate(t *testing.T) {
 }
 
 type onDeleteParams struct {
-	setup mock.SetupFunc
-	obj   any
+	setup  mock.SetupFunc
+	delay  controller.Delay
+	mark   *corev1.Pod
+	obj    any
+	filter controller.Filter
 }
 
 var onDeleteTestCases = map[string]onDeleteParams{
 	"valid-delete": {
 		setup: mock.Chain(CallQueueAdd("default/deleted-pod")),
+		mark:  pod("deleted-pod"),
 		obj:   pod("deleted-pod"),
 	},
 
-	"delete-with-tombstone": {
-		setup: mock.Chain(CallQueueAdd("default/tombstone-pod")),
+	"delete-tombstone": {
+		setup: mock.Chain(CallQueueAdd("default/pod")),
+		mark:  NewPod(1, "100"),
 		obj: cache.DeletedFinalStateUnknown{
-			Key: "default/tombstone-pod",
-			Obj: pod("tombstone-pod"),
+			Key: "default/pod", Obj: NewPod(1, "100"),
 		},
 	},
 
 	"invalid-delete-object": {
 		setup: mock.Chain(CallProcessorHandlerNotify("")),
 		obj:   "invalid",
+	},
+
+	"filter-dropping": {
+		filter: Pass(false),
+		obj:    pod("deleted-pod"),
 	},
 }
 
@@ -263,29 +377,54 @@ func TestOnDelete(t *testing.T) {
 			mocks := mock.NewMocks(t).Expect(param.setup)
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			queue := mock.Get(mocks, NewMockQueue[string])
+			tracker := controller.NewSelfWriteTracker(0)
+			if param.mark != nil {
+				tracker.Mark(param.mark)
+			}
+
+			filters := []controller.Filter{tracker.Filter}
+			if param.filter != nil {
+				filters = append(filters, param.filter)
+			}
+
 			eventHandler := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue)
+				handler, queue, param.delay, filters...)
 
 			// When
 			eventHandler.OnDelete(param.obj)
+
+			// Then
+			if param.mark != nil {
+				result := tracker.Filter(controller.OpUpdate, nil, param.mark)
+				assert.True(t, result)
+			}
 		})
 }
 
 type newProcessorParams struct {
 	workers int
+	expect  int
 }
 
 var newProcessorTestCases = map[string]newProcessorParams{
 	"with-single-worker": {
 		workers: 1,
+		expect:  1,
 	},
 
 	"with-multiple-workers": {
 		workers: 3,
+		expect:  3,
 	},
 
 	"with-zero-workers": {
 		workers: 0,
+		expect:  0,
+	},
+
+	"with-negative-workers": {
+		workers: -1,
+		expect:  -1,
 	},
 }
 
@@ -306,7 +445,9 @@ func TestNewProcessor(t *testing.T) {
 				handler, informer, param.workers, queue, recorder)
 
 			// Then
-			assert.NotNil(t, processor)
+			require.NotNil(t, processor)
+			assert.Equal(t, param.expect,
+				reflect.NewAccessor(processor).Get("workers"))
 		})
 }
 
@@ -316,6 +457,15 @@ type runParams struct {
 }
 
 var runTestCases = map[string]runParams{
+	"no-workers": {
+		setup: mock.Chain(
+			CallProcessorHandlerNotify("starting processor"),
+			CallProcessorHandlerNotify("stopping processor"),
+			CallQueueShutDown(),
+		),
+		workers: 0,
+	},
+
 	"single-worker": {
 		setup: mock.Chain(
 			CallProcessorHandlerNotify("starting processor"),
@@ -381,7 +531,8 @@ var processTestCases = map[string]processParams{
 		setup: mock.Chain(
 			CallQueueGet("default/test-pod", false),
 			CallIndexerGetByKey("default/test-pod", pod("test-pod"), true, nil),
-			CallHandlerHandle(pod("test-pod"), nil),
+			CallHandlerHandle(pod("test-pod"), nil, nil),
+			CallQueueForget("default/test-pod"),
 			CallQueueName("test-queue"),
 			CallRecorderDoneEventAny("test-queue", true),
 			CallQueueDone("default/test-pod"),
@@ -394,8 +545,22 @@ var processTestCases = map[string]processParams{
 		setup: mock.Chain(
 			CallQueueGet("default/test-pod", false),
 			CallIndexerGetByKey("default/test-pod", pod("test-pod"), true, nil),
-			CallHandlerHandle(pod("test-pod"), nil),
+			CallHandlerHandle(pod("test-pod"), nil, nil),
+			CallQueueForget("default/test-pod"),
 			CallQueueDone("default/test-pod"),
+			CallQueueGet("", true)),
+		withQueue: true,
+	},
+
+	"success-with-schedule": {
+		setup: mock.Chain(
+			CallQueueGet("default/scheduled-pod", false),
+			CallIndexerGetByKey("default/scheduled-pod",
+				pod("scheduled-pod"), true, nil),
+			CallHandlerHandleScheduled(pod("scheduled-pod"), time.Now()),
+			CallQueueAddAfterAnyDelay("default/scheduled-pod"),
+			CallQueueForget("default/scheduled-pod"),
+			CallQueueDone("default/scheduled-pod"),
 			CallQueueGet("", true)),
 		withQueue: true,
 	},
@@ -415,6 +580,7 @@ var processTestCases = map[string]processParams{
 		setup: mock.Chain(
 			CallQueueGet("default/missing-pod", false),
 			CallIndexerGetByKey("default/missing-pod", nil, false, nil),
+			CallQueueForget("default/missing-pod"),
 			CallQueueDone("default/missing-pod"),
 			CallQueueGet("", true)),
 		withQueue: true,
@@ -436,7 +602,7 @@ var processTestCases = map[string]processParams{
 			CallQueueGet("default/handler-error", false),
 			CallIndexerGetByKey("default/handler-error",
 				pod("handler-error"), true, nil),
-			CallHandlerHandle(pod("handler-error"), assert.AnError),
+			CallHandlerHandle(pod("handler-error"), nil, assert.AnError),
 			CallQueueRequeue("default/handler-error", nil),
 			CallQueueName("test-queue"),
 			CallRecorderDoneEventAny("test-queue", false),
@@ -451,7 +617,7 @@ var processTestCases = map[string]processParams{
 			CallQueueGet("default/requeue-error", false),
 			CallIndexerGetByKey("default/requeue-error",
 				pod("requeue-error"), true, nil),
-			CallHandlerHandle(pod("requeue-error"), assert.AnError),
+			CallHandlerHandle(pod("requeue-error"), nil, assert.AnError),
 			CallQueueRequeue("default/requeue-error", assert.AnError),
 			CallProcessorHandlerNotify("default/requeue-error"),
 			CallQueueName("test-queue"),
@@ -469,9 +635,40 @@ var processTestCases = map[string]processParams{
 				true, nil),
 			CallHandlerHandlePanic(pod("panic-pod"), "handler panic"),
 			CallProcessorHandlerNotify("default/panic-pod"),
+			CallQueueName("test-queue"),
+			CallRecorderDoneEventAny("test-queue", false),
 			CallQueueDone("default/panic-pod"),
 			CallQueueGet("", true)),
-		withQueue: true,
+		withRecorder: true,
+		withQueue:    true,
+	},
+
+	"type-assertion-error-with-recorder": {
+		setup: mock.Chain(
+			CallQueueGet("default/invalid-type", false),
+			CallIndexerGetByKey("default/invalid-type",
+				"not-a-runtime-object", true, nil),
+			CallProcessorHandlerNotify("default/invalid-type"),
+			CallQueueName("test-queue"),
+			CallRecorderDoneEventAny("test-queue", false),
+			CallQueueDone("default/invalid-type"),
+			CallQueueGet("", true)),
+		withRecorder: true,
+		withQueue:    true,
+	},
+
+	"indexer-get-error-with-recorder": {
+		setup: mock.Chain(
+			CallQueueGet("default/error-pod", false),
+			CallIndexerGetByKey("default/error-pod", nil, false,
+				assert.AnError),
+			CallProcessorHandlerNotify("default/error-pod"),
+			CallQueueName("test-queue"),
+			CallRecorderDoneEventAny("test-queue", false),
+			CallQueueDone("default/error-pod"),
+			CallQueueGet("", true)),
+		withRecorder: true,
+		withQueue:    true,
 	},
 }
 

@@ -2,6 +2,7 @@ package controller_test
 
 import (
 	"context"
+	"net/url"
 	"strconv"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tkrop/go-testing/test"
+	"k8s.io/client-go/tools/metrics"
 
 	"github.com/tkrop/go-kube/controller"
 )
@@ -341,4 +343,83 @@ func matchLabels(metric *model.Metric, labelValues ...string) bool {
 	}
 
 	return true
+}
+
+type registerClientMetricsParams struct {
+	config controller.RecorderConfig
+	verb   string
+	url    string
+	code   string
+	method string
+	host   string
+	expect []string
+	error  error
+}
+
+// The metric providers of the Kubernetes client are global, so registering
+// and observing them must happen in a single test case.
+var registerClientMetricsTestCases = map[string]registerClientMetricsParams{
+	"register-observe-and-repeat": {
+		config: controller.RecorderConfig{
+			Namespace: "test", Subsystem: "client",
+		},
+		verb:   "GET",
+		url:    "https://api.example.com/apis/v1/pods",
+		code:   "200",
+		method: "GET",
+		host:   "api.example.com",
+		expect: []string{
+			"test_client_request_duration",
+			"test_client_requests_total",
+			"test_client_retries_total",
+			"test_client_throttle_duration",
+		},
+		error: controller.ErrController.New(
+			"client metrics already registered"),
+	},
+}
+
+func TestRegisterClientMetrics(t *testing.T) {
+	test.Map(t, registerClientMetricsTestCases).
+		RunSeq(func(t test.Test, param registerClientMetricsParams) {
+			// Given
+			reg := prometheus.NewRegistry()
+			target := test.Must(url.Parse(param.url))
+
+			// When
+			err := controller.RegisterClientMetrics(param.config, reg)
+
+			// Then
+			assert.NoError(t, err)
+
+			// When
+			metrics.RequestLatency.Observe(
+				ctx, param.verb, *target, time.Second)
+			metrics.RateLimiterLatency.Observe(
+				ctx, param.verb, *target, time.Second)
+			metrics.RequestResult.Increment(
+				ctx, param.code, param.method, param.host)
+			metrics.RequestRetry.IncrementRetry(
+				ctx, param.code, param.method, param.host)
+
+			// Then
+			assert.Equal(t, param.expect, MetricNames(t, reg))
+			assert.Equal(t, param.error,
+				controller.RegisterClientMetrics(param.config, reg))
+		})
+}
+
+// MetricNames collects the names of the metrics registered in the registry.
+func MetricNames(t test.Test, reg *prometheus.Registry) []string {
+	t.Helper()
+
+	families, err := reg.Gather()
+	assert.NoError(t, err)
+
+	names := make([]string, 0, len(families))
+	for _, family := range families {
+		names = append(names, family.GetName())
+	}
+
+	return names
 }

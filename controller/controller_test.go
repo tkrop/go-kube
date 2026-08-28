@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 
 	"go.uber.org/mock/gomock"
 
@@ -86,6 +87,26 @@ func CallRecorderAddEvent() mock.SetupFunc {
 	}
 }
 
+func CallRecorderEventAny() mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		recorder := mock.Get(mocks, NewMockRecorder)
+		recorder.EXPECT().
+			GetEvent(gomock.Any(), gomock.Any(), gomock.Any()).
+			AnyTimes()
+
+		return recorder.EXPECT().DoneEvent(gomock.Any(), gomock.Any(),
+			gomock.Any(), gomock.Any()).AnyTimes()
+	}
+}
+
+func CallHandlerHandleAny() mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
+			Handle(gomock.Any(), gomock.Any()).Return(nil, nil).
+			AnyTimes()
+	}
+}
+
 func CallHandlerNotify(key string, err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
@@ -99,6 +120,176 @@ func CallHandlerNotifyAny() mock.SetupFunc {
 			Notify(gomock.Any(), gomock.Any(), gomock.Any()).
 			AnyTimes()
 	}
+}
+
+type stripManagedFieldsParams struct {
+	obj    any
+	expect any
+}
+
+var stripManagedFieldsTestCases = map[string]stripManagedFieldsParams{
+	"without-managed-fields": {
+		obj:    pod("strip-pod"),
+		expect: pod("strip-pod"),
+	},
+
+	"with-managed-fields": {
+		obj:    NewManagedPod("strip-pod"),
+		expect: pod("strip-pod"),
+	},
+
+	"without-meta": {
+		obj:    "no-meta",
+		expect: "no-meta",
+	},
+
+	"tombstone": {
+		obj: cache.DeletedFinalStateUnknown{
+			Key: "default/strip-pod", Obj: NewManagedPod("strip-pod"),
+		},
+		expect: cache.DeletedFinalStateUnknown{
+			Key: "default/strip-pod", Obj: NewManagedPod("strip-pod"),
+		},
+	},
+}
+
+// NewManagedPod creates a pod carrying managed fields.
+func NewManagedPod(name string) *corev1.Pod {
+	result := pod(name)
+	result.ManagedFields = []metav1.ManagedFieldsEntry{{
+		Manager: "kubectl", Operation: metav1.ManagedFieldsOperationApply,
+	}}
+
+	return result
+}
+
+func TestStripManagedFields(t *testing.T) {
+	test.Map(t, stripManagedFieldsTestCases).
+		Run(func(t test.Test, param stripManagedFieldsParams) {
+			// When
+			result, err := controller.StripManagedFields(param.obj)
+
+			// Then
+			assert.NoError(t, err)
+			assert.Equal(t, param.expect, result)
+		})
+}
+
+type jitterParams struct {
+	key    string
+	window time.Duration
+	expect time.Duration
+}
+
+var jitterTestCases = map[string]jitterParams{
+	"zero-window": {
+		key: "default/pod",
+	},
+
+	"negative-window": {
+		key:    "default/pod",
+		window: -time.Minute,
+	},
+
+	"single-nanosecond-window": {
+		key:    "default/pod",
+		window: time.Nanosecond,
+	},
+}
+
+func TestJitter(t *testing.T) {
+	test.Map(t, jitterTestCases).
+		Run(func(t test.Test, param jitterParams) {
+			// Given
+			delay := controller.NewDelay(0, param.window)
+
+			// When
+			result := delay.Jitter(param.key)
+
+			// Then
+			assert.Equal(t, param.expect, result)
+		})
+}
+
+type jitterWindowParams struct {
+	keys   []string
+	window time.Duration
+}
+
+var jitterWindowTestCases = map[string]jitterWindowParams{
+	"minute-window": {
+		keys: []string{
+			"default/pod-1", "default/pod-2", "other/pod-1", "other/pod-2",
+		},
+		window: time.Minute,
+	},
+
+	"millisecond-window": {
+		keys:   []string{"default/pod-1", "default/pod-2"},
+		window: time.Millisecond,
+	},
+}
+
+func TestJitterWindow(t *testing.T) {
+	test.Map(t, jitterWindowTestCases).
+		Run(func(t test.Test, param jitterWindowParams) {
+			// Given
+			delay := controller.NewDelay(0, param.window)
+
+			for _, key := range param.keys {
+				// When
+				offset := delay.Jitter(key)
+
+				// Then
+				assert.GreaterOrEqual(t, offset, time.Duration(0), key)
+				assert.Less(t, offset, param.window, key)
+				assert.Equal(t, offset, delay.Jitter(key), key)
+			}
+		})
+}
+
+type jitterSpreadParams struct {
+	keys    int
+	window  time.Duration
+	buckets int64
+	expect  int
+}
+
+// The offsets must not collapse into a few buckets, since this reproduces the
+// re-sync spike the jitter is supposed to spread.
+var jitterSpreadTestCases = map[string]jitterSpreadParams{
+	"spread-over-minute": {
+		keys:    100,
+		window:  time.Minute,
+		buckets: 10,
+		expect:  10,
+	},
+
+	"spread-over-hour": {
+		keys:    100,
+		window:  time.Hour,
+		buckets: 10,
+		expect:  10,
+	},
+}
+
+func TestJitterSpread(t *testing.T) {
+	test.Map(t, jitterSpreadTestCases).
+		Run(func(t test.Test, param jitterSpreadParams) {
+			// Given
+			delay := controller.NewDelay(0, param.window)
+
+			// When
+			buckets := map[int64]bool{}
+			for index := range param.keys {
+				offset := delay.Jitter(fmt.Sprintf("default/pod-%d", index))
+				buckets[int64(offset)*param.buckets/
+					int64(param.window)] = true
+			}
+
+			// Then
+			assert.Len(t, buckets, param.expect)
+		})
 }
 
 // TODO: integrate with tests.
@@ -150,44 +341,174 @@ func TestControllerNew(t *testing.T) {
 		})
 }
 
+type configLimiterParams struct {
+	limiter controller.RateLimiter
+	setup   mock.SetupFunc
+}
+
+var configLimiterTestCases = map[string]configLimiterParams{
+	"default-limiter": {
+		setup: CallRecorderLen("add-handler"),
+	},
+
+	"custom-limiter": {
+		limiter: func() workqueue.TypedRateLimiter[string] {
+			return workqueue.NewTypedItemFastSlowRateLimiter[string](
+				time.Millisecond, time.Second, 1)
+		},
+		setup: CallRecorderLen("add-handler"),
+	},
+}
+
+func TestConfigLimiter(t *testing.T) {
+	test.Map(t, configLimiterTestCases).
+		Run(func(t test.Test, param configLimiterParams) {
+			// Given
+			mocks := mock.NewMocks(t).Expect(param.setup)
+			config := Config("add-handler")
+			config.RateLimiter = param.limiter
+			ctrl := controller.New[*corev1.Pod](config,
+				mock.Get(mocks, NewMockRetriever[*corev1.PodList]),
+				cache.Indexers{})
+
+			// When
+			err := ctrl.AddHandler("add-handler",
+				mock.Get(mocks, NewMockHandler[*corev1.Pod]),
+				mock.Get(mocks, NewMockRecorder))
+
+			// Then
+			assert.NoError(t, err)
+		})
+}
+
+// podEventHandlers is the handler slice retained by the controller.
+type podEventHandlers = []*controller.ResourceEventHandler[*corev1.Pod]
+
+// handlerSpec captures the observable identity of a retained event handler.
+// The handlers cannot be compared as a whole, since their queues wrap live
+// channels and a condition variable.
+type handlerSpec struct {
+	handler controller.Handler[*corev1.Pod]
+	queue   string
+}
+
+// handlerSpecs extracts the specs of the handlers retained by the controller.
+func handlerSpecs(ctrl controller.Controller[*corev1.Pod]) []handlerSpec {
+	handlers := test.Cast[podEventHandlers](
+		reflect.NewAccessor(ctrl).Get("handler"))
+
+	specs := make([]handlerSpec, 0, len(handlers))
+	for _, handler := range handlers {
+		accessor := reflect.NewAccessor(handler)
+		specs = append(specs, handlerSpec{
+			handler: test.Cast[controller.Handler[*corev1.Pod]](
+				accessor.Get("handler")),
+			queue: test.Cast[controller.Queue[string]](
+				accessor.Get("queue")).Name(),
+		})
+	}
+
+	return specs
+}
+
+// CallInformerAddHandler sets up the handler registration on the informer.
+// The registered handler is created inside the controller and therefore only
+// validated via the retained handler specs.
+func CallInformerAddHandler(err error) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockSharedIndexInformer).EXPECT().
+			AddEventHandlerWithResyncPeriod(gomock.Any(), time.Minute).
+			Return(nil, err)
+	}
+}
+
+// CallInformerGetIndexer sets up the indexer lookup on the informer.
+func CallInformerGetIndexer() mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockSharedIndexInformer).EXPECT().
+			GetIndexer().Return(nil)
+	}
+}
+
+// ErrAddHandler creates the error expected when registering the handler with
+// the given name fails.
+func ErrAddHandler(name string, err error) error {
+	return controller.ErrController.New(
+		"event handler [name=%s, handler=%s] %w", "add-handler", name, err)
+}
+
 type controllerAddHandlerParams struct {
 	setup  mock.SetupFunc
-	before func(ctrl controller.Controller[*corev1.Pod])
-	expect func(ctrl controller.Controller[*corev1.Pod]) error
+	names  []string
+	expect []string
+	errors []error
 }
 
 var controllerAddHandlerTestCases = map[string]controllerAddHandlerParams{
 	"success": {
-		setup: CallRecorderLen("add-handler"),
+		setup: mock.Chain(
+			CallRecorderLen("add-handler"),
+			CallInformerAddHandler(nil),
+			CallInformerGetIndexer(),
+		),
+		names:  []string{"add-handler"},
+		expect: []string{"add-handler"},
+		errors: []error{nil},
 	},
+
+	"second-handler": {
+		setup: mock.Chain(
+			CallRecorderLen("add-handler"),
+			CallInformerAddHandler(nil),
+			CallInformerGetIndexer(),
+			CallRecorderLen("other-handler"),
+			CallInformerAddHandler(nil),
+			CallInformerGetIndexer(),
+		),
+		names:  []string{"add-handler", "other-handler"},
+		expect: []string{"add-handler", "other-handler"},
+		errors: []error{nil, nil},
+	},
+
 	"error": {
 		setup: mock.Chain(
-			CallRetrieverWatchEndless[*corev1.PodList](),
-			CallRetrieverList(NewPodList(p1, p2), nil),
 			CallRecorderLen("add-handler"),
+			CallInformerAddHandler(assert.AnError),
 		),
-		before: func(ctrl controller.Controller[*corev1.Pod]) {
-			ctx, cancel := context.WithCancel(context.Background())
-			sigerr := make(chan error, 1)
-			ctrl.Init(ctx, sigerr)
-			go ctrl.Run(ctx)
-			time.Sleep(100 * time.Millisecond)
-			cancel()
-			// Wait with timeout for controller to shut down
-			select {
-			case <-sigerr:
-				// Controller shut down cleanly
-			case <-time.After(200 * time.Millisecond):
-				// Continue anyway - controller might still be shutting down
-			}
-			time.Sleep(50 * time.Millisecond)
+		names:  []string{"add-handler"},
+		expect: []string{},
+		errors: []error{
+			ErrAddHandler("add-handler", assert.AnError),
 		},
-		expect: func(ctrl controller.Controller[*corev1.Pod]) error {
-			return controller.ErrController.New("event handler [name=%s] %w",
-				"add-handler", fmt.Errorf("handler %v was not added to "+
-					"shared informer because it has stopped already",
-					test.Cast[[]*controller.ResourceEventHandler[*corev1.Pod]](
-						reflect.NewAccessor(ctrl).Get("handler"))[0]))
+	},
+
+	"second-handler-error": {
+		setup: mock.Chain(
+			CallRecorderLen("add-handler"),
+			CallInformerAddHandler(nil),
+			CallInformerGetIndexer(),
+			CallRecorderLen("other-handler"),
+			CallInformerAddHandler(assert.AnError),
+		),
+		names:  []string{"add-handler", "other-handler"},
+		expect: []string{"add-handler"},
+		errors: []error{
+			nil, ErrAddHandler("other-handler", assert.AnError),
+		},
+	},
+
+	"both-error": {
+		setup: mock.Chain(
+			CallRecorderLen("add-handler"),
+			CallInformerAddHandler(assert.AnError),
+			CallRecorderLen("other-handler"),
+			CallInformerAddHandler(assert.AnError),
+		),
+		names:  []string{"add-handler", "other-handler"},
+		expect: []string{},
+		errors: []error{
+			ErrAddHandler("add-handler", assert.AnError),
+			ErrAddHandler("other-handler", assert.AnError),
 		},
 	},
 }
@@ -201,21 +522,99 @@ func TestControllerAddHandler(t *testing.T) {
 				Config("add-handler"),
 				mock.Get(mocks, NewMockRetriever[*corev1.PodList]),
 				cache.Indexers{})
+			reflect.NewAccessor(ctrl).Set("informer",
+				mock.Get(mocks, NewMockSharedIndexInformer))
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			recorder := mock.Get(mocks, NewMockRecorder)
+
+			// When
+			errs := make([]error, 0, len(param.names))
+			for _, name := range param.names {
+				errs = append(errs, ctrl.AddHandler(name, handler, recorder))
+			}
+
+			// Then
+			assert.Equal(t, param.errors, errs)
+			expect := make([]handlerSpec, 0, len(param.expect))
+			for _, queue := range param.expect {
+				expect = append(expect, handlerSpec{
+					handler: handler, queue: queue,
+				})
+			}
+			assert.Equal(t, expect, handlerSpecs(ctrl))
+		})
+}
+
+type controllerTransformParams struct {
+	setup     mock.SetupFunc
+	before    func(ctrl controller.Controller[*corev1.Pod])
+	transform cache.TransformFunc
+	obj       any
+	expect    any
+	error     error
+}
+
+var controllerTransformTestCases = map[string]controllerTransformParams{
+	"without-transform": {
+		obj:    NewManagedPod("transform-pod"),
+		expect: NewManagedPod("transform-pod"),
+	},
+
+	"with-transform": {
+		transform: controller.StripManagedFields,
+		obj:       NewManagedPod("transform-pod"),
+		expect:    pod("transform-pod"),
+	},
+
+	"informer-started": {
+		setup: mock.Setup(
+			CallRetrieverWatchEndless[*corev1.PodList](),
+			CallRetrieverList(NewPodList(p1, p2), nil),
+		),
+		before: func(ctrl controller.Controller[*corev1.Pod]) {
+			sigerr := make(chan error, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ctrl.Init(ctx, sigerr)
+		},
+		transform: controller.StripManagedFields,
+		obj:       NewManagedPod("transform-pod"),
+		expect:    NewManagedPod("transform-pod"),
+		error: controller.ErrController.New(
+			"set transform [name=%s]: %w", "transform",
+			errors.New("informer has already started").Unwrap()),
+	},
+}
+
+func TestControllerSetTransform(t *testing.T) {
+	test.Map(t, controllerTransformTestCases).
+		Run(func(t test.Test, param controllerTransformParams) {
+			// Given
+			mocks := mock.NewMocks(t).Expect(param.setup)
+			ctrl := controller.New[*corev1.Pod](Config("transform"),
+				mock.Get(mocks, NewMockRetriever[*corev1.PodList]),
+				cache.Indexers{})
 			if param.before != nil {
 				param.before(ctrl)
 			}
 
 			// When
-			err := ctrl.AddHandler(handler, recorder)
+			var err error
+			if param.transform != nil {
+				err = ctrl.SetTransform(param.transform)
+			}
 
 			// Then
-			if param.expect != nil {
-				assert.Equal(t, param.expect(ctrl), err)
-			} else {
-				assert.Nil(t, err)
+			assert.Equal(t, param.error, err)
+			informer := test.Cast[cache.SharedIndexInformer](
+				reflect.NewAccessor(ctrl).Get("informer"))
+			transform := test.Cast[cache.TransformFunc](
+				reflect.NewAccessor(informer).Get("transform"))
+			result := param.obj
+			if transform != nil {
+				result = test.Must(transform(param.obj))
 			}
+			assert.Equal(t, param.expect, result)
 		})
 }
 
@@ -261,17 +660,41 @@ var controllerRunTestCases = map[string]controllerRunParams{
 		config: &controller.Config{
 			Name: "run", Workers: 0, Sync: time.Minute,
 		},
-		setup: mock.Chain(
-			CallRetrieverWatchEndless[*corev1.PodList](),
-			CallRecorderLen("run"),
-			CallRetrieverList(NewPodList(p1, p2), nil),
+		setup: mock.Setup(
+			mock.Chain(
+				CallRetrieverWatchEndless[*corev1.PodList](),
+				CallRecorderLen("run"),
+				CallRetrieverList(NewPodList(p1, p2), nil),
+			),
 			CallRecorderAddEvent(),
 			CallHandlerNotifyAny(),
 		),
 		before: func(ctrl controller.Controller[*corev1.Pod], mocks *mock.Mocks) {
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			recorder := mock.Get(mocks, NewMockRecorder)
-			_ = ctrl.AddHandler(handler, recorder)
+			_ = ctrl.AddHandler("run", handler, recorder)
+		},
+	},
+
+	"with-worker": {
+		config: &controller.Config{
+			Name: "run", Workers: 1, Sync: time.Minute,
+		},
+		setup: mock.Setup(
+			mock.Chain(
+				CallRetrieverWatchEndless[*corev1.PodList](),
+				CallRecorderLen("run"),
+				CallRetrieverList(NewPodList(p1, p2), nil),
+			),
+			CallRecorderAddEvent(),
+			CallRecorderEventAny(),
+			CallHandlerHandleAny(),
+			CallHandlerNotifyAny(),
+		),
+		before: func(ctrl controller.Controller[*corev1.Pod], mocks *mock.Mocks) {
+			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
+			recorder := mock.Get(mocks, NewMockRecorder)
+			_ = ctrl.AddHandler("run", handler, recorder)
 		},
 	},
 }
@@ -429,6 +852,35 @@ var controllerListTestCases = map[string]controllerListParams{
 		indexer:   NewIndexer(d1, p1, p2, p3, p4, p5, p6, p7),
 		expect:    []*corev1.Pod{p1, p2, p3, p4, p5},
 	},
+
+	// Indexed lookups using the registered owner indexers.
+	"index-by-uid": {
+		namespace: "default",
+		uid:       "owner-id",
+		indexer:   NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:    []*corev1.Pod{p2, p3},
+	},
+
+	"index-by-name": {
+		namespace: "default",
+		name:      "owner",
+		indexer:   NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:    []*corev1.Pod{p2, p4},
+	},
+
+	"index-by-uid-and-name": {
+		namespace: "default",
+		name:      "owner",
+		uid:       "owner-id",
+		indexer:   NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:    []*corev1.Pod{p2},
+	},
+
+	"index-without-owner": {
+		namespace: "default",
+		indexer:   NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:    []*corev1.Pod{p1, p2, p3, p4, p5},
+	},
 }
 
 func TestControllerList(t *testing.T) {
@@ -451,5 +903,61 @@ func TestControllerList(t *testing.T) {
 		}).
 		Cleanup(func() {
 			log.SetLevel(log.InfoLevel)
+		})
+}
+
+type controllerListByIndexParams struct {
+	index   string
+	value   string
+	indexer cache.Indexer
+	expect  []*corev1.Pod
+}
+
+var controllerListByIndexTestCases = map[string]controllerListByIndexParams{
+	"by-owner-uid": {
+		index:   controller.IndexOwnerUID,
+		value:   "owner-id",
+		indexer: NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:  []*corev1.Pod{p2, p3, p7},
+	},
+
+	"by-owner-name": {
+		index:   controller.IndexOwnerName,
+		value:   "owner",
+		indexer: NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:  []*corev1.Pod{p2, p4, p7},
+	},
+
+	"unknown-value": {
+		index:   controller.IndexOwnerUID,
+		value:   "missing",
+		indexer: NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:  []*corev1.Pod{},
+	},
+
+	"unknown-index": {
+		index:   "missing",
+		value:   "owner-id",
+		indexer: NewOwnerIndexer(p1, p2, p3, p4, p5, p6, p7),
+		expect:  []*corev1.Pod{},
+	},
+}
+
+func TestControllerListByIndex(t *testing.T) {
+	test.Map(t, controllerListByIndexTestCases).
+		Run(func(t test.Test, param controllerListByIndexParams) {
+			// Given
+			mocks := mock.NewMocks(t)
+			retriever := mock.Get(mocks, NewMockRetriever[*corev1.PodList])
+			ctrl := controller.New[*corev1.Pod](
+				Config("list-index"), retriever, cache.Indexers{})
+			reflect.NewAccessor(reflect.NewAccessor(ctrl).Get("informer")).
+				Set("indexer", GetIndexer(mocks, param.indexer))
+
+			// When
+			result := ctrl.ListByIndex(param.index, param.value)
+
+			// Then
+			assert.ElementsMatch(t, param.expect, result)
 		})
 }
