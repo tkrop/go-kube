@@ -102,7 +102,7 @@ func CallRecorderEventAny() mock.SetupFunc {
 func CallHandlerHandleAny() mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
-			Handle(gomock.Any(), gomock.Any()).Return(nil).
+			Handle(gomock.Any(), gomock.Any()).Return(nil, nil).
 			AnyTimes()
 	}
 }

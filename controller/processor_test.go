@@ -58,6 +58,13 @@ func CallQueueAddAfter(key string, delay time.Duration) mock.SetupFunc {
 	}
 }
 
+func CallQueueAddAfterAnyDelay(key string) mock.SetupFunc {
+	return func(mocks *mock.Mocks) any {
+		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
+			AddAfter(gomock.Any(), key, gomock.Any())
+	}
+}
+
 func CallQueueRequeue(key string, err error) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockQueue[string]).EXPECT().
@@ -112,12 +119,18 @@ func CallRecorderDoneEventAny(
 }
 
 func CallHandlerHandle(
-	obj runtime.Object, err error,
+	obj runtime.Object, next *time.Time, err error,
 ) mock.SetupFunc {
 	return func(mocks *mock.Mocks) any {
 		return mock.Get(mocks, NewMockHandler[*corev1.Pod]).EXPECT().
-			Handle(gomock.Any(), obj).Return(err)
+			Handle(gomock.Any(), obj).Return(next, err)
 	}
+}
+
+func CallHandlerHandleScheduled(
+	obj runtime.Object, next time.Time,
+) mock.SetupFunc {
+	return CallHandlerHandle(obj, &next, nil)
 }
 
 func CallHandlerHandlePanic(
@@ -505,7 +518,7 @@ var processTestCases = map[string]processParams{
 		setup: mock.Chain(
 			CallQueueGet("default/test-pod", false),
 			CallIndexerGetByKey("default/test-pod", pod("test-pod"), true, nil),
-			CallHandlerHandle(pod("test-pod"), nil),
+			CallHandlerHandle(pod("test-pod"), nil, nil),
 			CallQueueForget("default/test-pod"),
 			CallQueueName("test-queue"),
 			CallRecorderDoneEventAny("test-queue", true),
@@ -519,9 +532,22 @@ var processTestCases = map[string]processParams{
 		setup: mock.Chain(
 			CallQueueGet("default/test-pod", false),
 			CallIndexerGetByKey("default/test-pod", pod("test-pod"), true, nil),
-			CallHandlerHandle(pod("test-pod"), nil),
+			CallHandlerHandle(pod("test-pod"), nil, nil),
 			CallQueueForget("default/test-pod"),
 			CallQueueDone("default/test-pod"),
+			CallQueueGet("", true)),
+		withQueue: true,
+	},
+
+	"success-with-schedule": {
+		setup: mock.Chain(
+			CallQueueGet("default/scheduled-pod", false),
+			CallIndexerGetByKey("default/scheduled-pod",
+				pod("scheduled-pod"), true, nil),
+			CallHandlerHandleScheduled(pod("scheduled-pod"), time.Now()),
+			CallQueueAddAfterAnyDelay("default/scheduled-pod"),
+			CallQueueForget("default/scheduled-pod"),
+			CallQueueDone("default/scheduled-pod"),
 			CallQueueGet("", true)),
 		withQueue: true,
 	},
@@ -563,7 +589,7 @@ var processTestCases = map[string]processParams{
 			CallQueueGet("default/handler-error", false),
 			CallIndexerGetByKey("default/handler-error",
 				pod("handler-error"), true, nil),
-			CallHandlerHandle(pod("handler-error"), assert.AnError),
+			CallHandlerHandle(pod("handler-error"), nil, assert.AnError),
 			CallQueueRequeue("default/handler-error", nil),
 			CallQueueName("test-queue"),
 			CallRecorderDoneEventAny("test-queue", false),
@@ -578,7 +604,7 @@ var processTestCases = map[string]processParams{
 			CallQueueGet("default/requeue-error", false),
 			CallIndexerGetByKey("default/requeue-error",
 				pod("requeue-error"), true, nil),
-			CallHandlerHandle(pod("requeue-error"), assert.AnError),
+			CallHandlerHandle(pod("requeue-error"), nil, assert.AnError),
 			CallQueueRequeue("default/requeue-error", assert.AnError),
 			CallProcessorHandlerNotify("default/requeue-error"),
 			CallQueueName("test-queue"),

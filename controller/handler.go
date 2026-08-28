@@ -5,6 +5,7 @@ import (
 	"fmt"
 	goruntime "runtime"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tkrop/go-kube/errors"
@@ -25,8 +26,9 @@ const (
 
 // Handler is the interface the resource event handler.
 type Handler[T runtime.Object] interface {
-	// Handle knows how to handle resource events.
-	Handle(ctx context.Context, obj runtime.Object) error
+	// Handle knows how to handle resource events. A non-nil return time
+	// schedules the current resource for another reconciliation.
+	Handle(ctx context.Context, obj runtime.Object) (*time.Time, error)
 	// Notify is called to notify about errors during processing. The error
 	// may be of type `ErrPanic`, to indicates that the controller loop has
 	// panicked, or `nil` to indicate an informational message.
@@ -35,13 +37,13 @@ type Handler[T runtime.Object] interface {
 
 // handler is the implementation of the resource event handler.
 type handler[T runtime.Object] struct {
-	handle func(ctx context.Context, obj T) error
+	handle func(ctx context.Context, obj T) (*time.Time, error)
 	base   *errors.Error
 }
 
 // NewHandler creates a new resource event handler.
 func NewHandler[T runtime.Object](
-	handle func(ctx context.Context, obj T) error,
+	handle func(ctx context.Context, obj T) (*time.Time, error),
 	base *errors.Error,
 ) Handler[T] {
 	return &handler[T]{
@@ -53,9 +55,9 @@ func NewHandler[T runtime.Object](
 // Handle handles the regular synchronization logic. Called by the controller.
 func (r *handler[T]) Handle(
 	ctx context.Context, obj runtime.Object,
-) error {
+) (*time.Time, error) {
 	if typed, ok := obj.(T); !ok {
-		return r.base.New("invalid type [type=%T]", obj)
+		return nil, r.base.New("invalid type [type=%T]", obj)
 	} else {
 		return r.handle(ctx, typed)
 	}
@@ -78,7 +80,7 @@ func (r *handler[T]) Notify(
 	} else if err != nil {
 		logger.WithError(err).Error(msg)
 	} else {
-		logger.Trace(msg)
+		logger.Debug(msg)
 	}
 }
 

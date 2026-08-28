@@ -216,7 +216,7 @@ func (p *Processor[T]) handle(
 		return err
 	}
 
-	if err = p.handler.Handle(ctx, o); err != nil {
+	if next, err := p.handler.Handle(ctx, o); err != nil {
 		err = ErrController.New("handle [key=%s]: %w", key, err)
 		if rerr := p.queue.Requeue(ctx, key); rerr != nil {
 			p.handler.Notify(ctx, key,
@@ -224,6 +224,12 @@ func (p *Processor[T]) handle(
 		}
 
 		return err
+	} else if next != nil {
+		delay := time.Until(*next)
+		if delay < 0 {
+			delay = 0
+		}
+		p.queue.AddAfter(ctx, key, delay)
 	}
 
 	return nil
