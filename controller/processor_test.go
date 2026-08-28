@@ -21,6 +21,8 @@ import (
 	"github.com/tkrop/go-kube/controller"
 )
 
+// TODO: this is an AI generated test that needs to be reviewed and improved.
+
 func pod(name string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -337,34 +339,29 @@ func TestOnUpdate(t *testing.T) {
 type onDeleteParams struct {
 	setup  mock.SetupFunc
 	delay  controller.Delay
-	filter controller.Filter
+	mark   *corev1.Pod
 	obj    any
+	filter controller.Filter
 }
 
 var onDeleteTestCases = map[string]onDeleteParams{
 	"valid-delete": {
 		setup: mock.Chain(CallQueueAdd("default/deleted-pod")),
+		mark:  pod("deleted-pod"),
 		obj:   pod("deleted-pod"),
 	},
 
-	"delete-with-tombstone": {
-		setup: mock.Chain(CallQueueAdd("default/tombstone-pod")),
+	"delete-tombstone": {
+		setup: mock.Chain(CallQueueAdd("default/pod")),
+		mark:  NewPod(1, "100"),
 		obj: cache.DeletedFinalStateUnknown{
-			Key: "default/tombstone-pod",
-			Obj: pod("tombstone-pod"),
+			Key: "default/pod", Obj: NewPod(1, "100"),
 		},
 	},
 
 	"invalid-delete-object": {
 		setup: mock.Chain(CallProcessorHandlerNotify("")),
 		obj:   "invalid",
-	},
-
-	// The tombstone is no resource and therefore filtered as nil object.
-	"filter-tombstone": {
-		setup:  mock.Chain(CallQueueAdd("default/tombstone-pod")),
-		filter: controller.GenerationChanged,
-		obj:    pod("tombstone-pod"),
 	},
 
 	"filter-dropping": {
@@ -380,11 +377,27 @@ func TestOnDelete(t *testing.T) {
 			mocks := mock.NewMocks(t).Expect(param.setup)
 			handler := mock.Get(mocks, NewMockHandler[*corev1.Pod])
 			queue := mock.Get(mocks, NewMockQueue[string])
+			tracker := controller.NewSelfWriteTracker(0)
+			if param.mark != nil {
+				tracker.Mark(param.mark)
+			}
+
+			filters := []controller.Filter{tracker.Filter}
+			if param.filter != nil {
+				filters = append(filters, param.filter)
+			}
+
 			eventHandler := controller.NewResourceEventHandler[*corev1.Pod](
-				handler, queue, param.delay, Filters(param.filter)...)
+				handler, queue, param.delay, filters...)
 
 			// When
 			eventHandler.OnDelete(param.obj)
+
+			// Then
+			if param.mark != nil {
+				result := tracker.Filter(controller.OpUpdate, nil, param.mark)
+				assert.True(t, result)
+			}
 		})
 }
 

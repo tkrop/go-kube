@@ -138,6 +138,27 @@ var filterTestCases = map[string]filterParams{
 		expect: true,
 	},
 
+	"version-on-delete": {
+		filter: controller.ResourceVersionChanged,
+		op:     controller.OpDelete,
+		obj:    NewPod(1, "100"),
+		expect: true,
+	},
+
+	"version-no-prev-meta": {
+		filter: controller.ResourceVersionChanged,
+		op:     controller.OpUpdate,
+		obj:    NewPod(1, "100"),
+		expect: true,
+	},
+
+	"version-no-obj-meta": {
+		filter: controller.ResourceVersionChanged,
+		op:     controller.OpUpdate,
+		prev:   NewPod(1, "100"),
+		expect: true,
+	},
+
 	// Combinators.
 	"and-empty": {
 		filter: controller.And(),
@@ -153,6 +174,16 @@ var filterTestCases = map[string]filterParams{
 		filter: controller.And(Pass(true), Pass(false)),
 	},
 
+	"and-nil-entry": {
+		filter: controller.And(nil, Pass(true)),
+		expect: true,
+	},
+
+	"and-only-nil": {
+		filter: controller.And(nil),
+		expect: true,
+	},
+
 	"or-empty": {
 		filter: controller.Or(),
 	},
@@ -166,12 +197,26 @@ var filterTestCases = map[string]filterParams{
 		filter: controller.Or(Pass(false), Pass(false)),
 	},
 
+	"or-nil-entry": {
+		filter: controller.Or(nil, Pass(true)),
+		expect: true,
+	},
+
+	"or-only-nil": {
+		filter: controller.Or(nil),
+	},
+
 	"not-true": {
 		filter: controller.Not(Pass(true)),
 	},
 
 	"not-false": {
 		filter: controller.Not(Pass(false)),
+		expect: true,
+	},
+
+	"not-nil": {
+		filter: controller.Not(nil),
 		expect: true,
 	},
 
@@ -208,6 +253,8 @@ func TestFilter(t *testing.T) {
 			assert.Equal(t, param.expect, result)
 		})
 }
+
+// TODO: this is an AI generated test that needs to be reviewed and improved.
 
 type selfWriteTrackerParams struct {
 	setup  func(*controller.SelfWriteTracker)
@@ -325,10 +372,10 @@ func TestSelfWriteTracker(t *testing.T) {
 }
 
 // TestSelfWriteTrackerTTLExpiry tests that entries older than the TTL are
-// treated as expired and do not suppress subsequent events.
+// treated as expired and no longer suppress a matching update.
 func TestSelfWriteTrackerTTLExpiry(t *testing.T) {
 	// Given
-	tracker := controller.NewSelfWriteTracker(0)
+	tracker := controller.NewSelfWriteTracker(1 * time.Millisecond)
 	pod := NewPod(1, "100")
 	tracker.Mark(pod)
 
@@ -338,24 +385,15 @@ func TestSelfWriteTrackerTTLExpiry(t *testing.T) {
 	// Then
 	assert.False(t, result, "matching update should be suppressed")
 
-	// Given: Create a new tracker with manually aged entry for testing TTL
-	tracker2 := controller.NewSelfWriteTracker(5 * time.Minute)
-	pod2 := NewPod(1, "200")
-	tracker2.Mark(pod2)
+	// Given: Re-mark the same entry and let it age past the TTL
+	tracker.Mark(pod)
+	time.Sleep(5 * time.Millisecond)
 
-	// Simulate TTL expiry by accessing the internal entries and setting old
-	// timestamp. This is a white-box test but necessary to test TTL behavior.
-	tracker2.Mark(pod2) // First mark
-
-	// Now advance time by sleeping more than TTL or verify the logic directly.
-	// Sleep longer than the default 5 minute TTL for a short test isn't
-	// practical. Instead, verify the one-shot consumption and non-match behavior.
-	// The TTL is tested implicitly through time-based expiry in production.
-	pod3 := NewPod(1, "201") // Different version
-	result2 := tracker2.Filter(controller.OpUpdate, nil, pod3)
+	// When: The same matching update is filtered again after expiry
+	result2 := tracker.Filter(controller.OpUpdate, nil, pod)
 
 	// Then
-	assert.True(t, result2, "non-matching version should pass")
+	assert.True(t, result2, "expired entry should not suppress event")
 }
 
 // TestSelfWriteTrackerConcurrency tests that the tracker is safe for

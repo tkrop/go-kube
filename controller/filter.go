@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"strconv"
 	"sync"
 	"time"
 
@@ -35,11 +34,19 @@ func (op Op) String() string {
 	}
 }
 
+// Filter decides whether an observed resource event is enqueued for
+// processing. The previous resource is only provided on update events, and
+// the resource is nil, if it cannot be accessed, e.g. for deletions observed
+// via a tombstone.
+type Filter func(op Op, prev, obj runtime.Object) bool
+
 // And creates a filter that passes an event, if all given filters pass it.
+// Filters are optional and often assembled conditionally via varargs, so a
+// nil entry is by design treated as a no-op filter instead of a caller error.
 func And(filters ...Filter) Filter {
 	return func(op Op, prev, obj runtime.Object) bool {
 		for _, filter := range filters {
-			if !filter(op, prev, obj) {
+			if filter != nil && !filter(op, prev, obj) {
 				return false
 			}
 		}
@@ -49,10 +56,12 @@ func And(filters ...Filter) Filter {
 }
 
 // Or creates a filter that passes an event, if any given filter passes it.
+// Filters are optional and often assembled conditionally via varargs, so a
+// nil entry is by design treated as a no-op filter instead of a caller error.
 func Or(filters ...Filter) Filter {
 	return func(op Op, prev, obj runtime.Object) bool {
 		for _, filter := range filters {
-			if filter(op, prev, obj) {
+			if filter != nil && filter(op, prev, obj) {
 				return true
 			}
 		}
@@ -61,18 +70,13 @@ func Or(filters ...Filter) Filter {
 	}
 }
 
-// Not creates a filter that passes an event, if the given filter drops it.
+// Not creates a filter that passes an event, if the given filter drops it. A
+// nil filter is by design treated as a no-op filter instead of a caller error.
 func Not(filter Filter) Filter {
 	return func(op Op, prev, obj runtime.Object) bool {
-		return !filter(op, prev, obj)
+		return filter == nil || !filter(op, prev, obj)
 	}
 }
-
-// Filter decides whether an observed resource event is enqueued for
-// processing. The previous resource is only provided on update events, and
-// the resource is nil, if it cannot be accessed, e.g. for deletions observed
-// via a tombstone.
-type Filter func(op Op, prev, obj runtime.Object) bool
 
 // GenerationChanged only passes update events changing the resource
 // generation. Since the generation is only advanced on spec changes of
@@ -89,8 +93,7 @@ func GenerationChanged(op Op, prev, obj runtime.Object) bool {
 		return true
 	}
 
-	return strconv.FormatInt(before.GetGeneration(), 10) !=
-		strconv.FormatInt(after.GetGeneration(), 10)
+	return before.GetGeneration() != after.GetGeneration()
 }
 
 // ResourceVersionChanged only passes update events changing the resource
@@ -177,9 +180,10 @@ func (t *SelfWriteTracker) Mark(obj metav1.Object) {
 // events matching marked writes. On update events, if the object's namespace/name
 // matches a marked write and the resource version matches exactly, the event is
 // dropped and the entry is consumed (one-shot). Add and delete events always pass
-// through, with delete events also clearing any tracked entry for that key to
-// prevent memory leaks. Stale entries older than the TTL are treated as expired
-// and do not suppress incoming events.
+// through. Delete events clear any tracked entry for that key when the object's
+// metadata is available (tombstones may not provide metadata and rely on TTL).
+// Stale entries older than the TTL are treated as expired and do not suppress
+// incoming events.
 func (t *SelfWriteTracker) Filter(op Op, _, obj runtime.Object) bool {
 	if op == OpDelete {
 		// Always pass delete events, but clean up the tracked entry.

@@ -39,7 +39,8 @@ func NewResourceEventHandler[T runtime.Object](
 }
 
 // combine merges the given filters into a single filter. It returns nil, if
-// no filters are given, to enqueue all resource events.
+// no filters are given, to enqueue all resource events. And already treats
+// nil entries, e.g. from conditionally assembled varargs, as a no-op.
 func combine(filter []Filter) Filter {
 	if len(filter) == 0 {
 		return nil
@@ -104,11 +105,14 @@ func resync(prev, obj runtime.Object) bool {
 	return before.GetResourceVersion() == after.GetResourceVersion()
 }
 
-// object converts the given event object into a resource object. It returns
-// nil, if the object is no resource, e.g. a deletion tombstone.
+// object converts the given event object into a resource object. It unwraps
+// deletion tombstones and returns nil, if no resource object can be accessed.
 func object(obj any) runtime.Object {
 	if result, ok := obj.(runtime.Object); ok {
 		return result
+	}
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		return object(tombstone.Obj)
 	}
 
 	return nil
