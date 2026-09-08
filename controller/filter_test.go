@@ -257,11 +257,11 @@ func TestFilter(t *testing.T) {
 // TODO: this is an AI generated test that needs to be reviewed and improved.
 
 type selfWriteTrackerParams struct {
-	setup  func(*controller.SelfWriteTracker)
+	setup  func(controller.Tracker)
 	op     controller.Op
 	obj    runtime.Object
 	expect bool
-	verify func(test.Test, *controller.SelfWriteTracker)
+	verify func(test.Test, controller.Tracker)
 }
 
 var selfWriteTrackerTestCases = map[string]selfWriteTrackerParams{
@@ -274,13 +274,13 @@ var selfWriteTrackerTestCases = map[string]selfWriteTrackerParams{
 
 	// Delete events always pass and clear the tracked entry.
 	"delete always passes": {
-		setup: func(t *controller.SelfWriteTracker) {
+		setup: func(t controller.Tracker) {
 			t.Mark(NewPod(1, "100"))
 		},
 		op:     controller.OpDelete,
 		obj:    NewPod(1, "100"),
 		expect: true,
-		verify: func(t test.Test, tracker *controller.SelfWriteTracker) {
+		verify: func(t test.Test, tracker controller.Tracker) {
 			// Verify the entry was cleared by marking a new write and
 			// checking that an update with the old version is not suppressed.
 			pod := NewPod(1, "100")
@@ -298,7 +298,7 @@ var selfWriteTrackerTestCases = map[string]selfWriteTrackerParams{
 
 	// Update with matching self-written RV is dropped.
 	"update matching self-written version dropped": {
-		setup: func(t *controller.SelfWriteTracker) {
+		setup: func(t controller.Tracker) {
 			t.Mark(NewPod(1, "100"))
 		},
 		op:     controller.OpUpdate,
@@ -308,13 +308,13 @@ var selfWriteTrackerTestCases = map[string]selfWriteTrackerParams{
 
 	// Update with matching self-written RV is consumed exactly once.
 	"update matching version consumed exactly once": {
-		setup: func(t *controller.SelfWriteTracker) {
+		setup: func(t controller.Tracker) {
 			t.Mark(NewPod(1, "100"))
 		},
 		op:     controller.OpUpdate,
 		obj:    NewPod(1, "100"),
 		expect: false,
-		verify: func(t test.Test, tracker *controller.SelfWriteTracker) {
+		verify: func(t test.Test, tracker controller.Tracker) {
 			// A second update with the same version should not be suppressed
 			// because the entry was consumed.
 			pod := NewPod(1, "100")
@@ -325,7 +325,7 @@ var selfWriteTrackerTestCases = map[string]selfWriteTrackerParams{
 
 	// Update with non-matching RV passes.
 	"update non-matching version passes": {
-		setup: func(t *controller.SelfWriteTracker) {
+		setup: func(t controller.Tracker) {
 			t.Mark(NewPod(1, "100"))
 		},
 		op:     controller.OpUpdate,
@@ -342,7 +342,7 @@ var selfWriteTrackerTestCases = map[string]selfWriteTrackerParams{
 
 	// Update with nil metadata passes.
 	"update nil metadata passes": {
-		setup: func(t *controller.SelfWriteTracker) {
+		setup: func(t controller.Tracker) {
 			t.Mark(NewPod(1, "100"))
 		},
 		op:     controller.OpUpdate,

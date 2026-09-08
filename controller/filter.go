@@ -122,6 +122,21 @@ func meta(obj runtime.Object) metav1.Object {
 	return nil
 }
 
+// Tracker defines an interface for objects that can filter events based on
+// tracking the own object writes.
+type Tracker interface {
+	// Filter decides whether an observed resource event is enqueued for
+	// processing. The previous resource is only provided on update events, and
+	// the resource is nil, if it cannot be accessed, e.g. for deletions
+	// observed via a tombstone.
+	Filter(op Op, prev, obj runtime.Object) bool
+	// Mark records the resource version of an object immediately after a
+	// successful write operation. The namespace and name form a unique key for
+	// tracking. This method is safe for concurrent use from multiple
+	// goroutines.
+	Mark(obj metav1.Object)
+}
+
 // selfWriteEntry stores the recorded resource version and timestamp for a
 // marked write.
 type selfWriteEntry struct {
@@ -145,7 +160,7 @@ type SelfWriteTracker struct {
 // TTL falls back to the default of 5 minutes. The TTL ensures that stale entries
 // from writes that were never echoed back (e.g., due to object deletion or
 // superseding writes) are automatically cleaned up.
-func NewSelfWriteTracker(ttl time.Duration) *SelfWriteTracker {
+func NewSelfWriteTracker(ttl time.Duration) Tracker {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
 	}
