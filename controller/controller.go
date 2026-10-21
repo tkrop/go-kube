@@ -205,8 +205,9 @@ func (c *controller[T]) AddHandler(
 	queue := NewRateLimitedQueue(name, limiter(),
 		c.config.Retries, recorder)
 
-	if err := c.addHandler(name, NewResourceEventHandler[T](
-		handler, queue, c.config.Delay, filter...)); err != nil {
+	err := c.addHandler(name, NewResourceEventHandler[T](
+		handler, queue, c.config.Delay, filter...))
+	if err != nil {
 		return err
 	}
 
@@ -220,8 +221,9 @@ func (c *controller[T]) AddHandler(
 func (c *controller[T]) addHandler(
 	name string, handler *ResourceEventHandler[T],
 ) error {
-	if _, err := c.informer.AddEventHandlerWithResyncPeriod(
-		handler, c.config.Sync); err != nil {
+	_, err := c.informer.AddEventHandlerWithResyncPeriod(
+		handler, c.config.Sync)
+	if err != nil {
 		return ErrController.New("event handler [name=%s, handler=%s] %w",
 			c.config.Name, name, err)
 	}
@@ -301,15 +303,15 @@ func (c *controller[T]) lookup(name string, uid types.UID) []any {
 	indexer := c.informer.GetIndexer()
 
 	if uid != "" {
-		if values, err := indexer.ByIndex(
-			IndexOwnerUID, string(uid)); err == nil {
+		values, err := indexer.ByIndex(IndexOwnerUID, string(uid))
+		if err == nil {
 			return values
 		}
 	}
 
 	if name != "" {
-		if values, err := indexer.ByIndex(
-			IndexOwnerName, name); err == nil {
+		values, err := indexer.ByIndex(IndexOwnerName, name)
+		if err == nil {
 			return values
 		}
 	}

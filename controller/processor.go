@@ -84,8 +84,9 @@ func (r *ResourceEventHandler[T]) enqueue(
 		return
 	}
 
-	if delay := r.delay.delay(key,
-		op == OpUpdate && resync(before, after)); delay > 0 {
+	delay := r.delay.delay(key,
+		op == OpUpdate && resync(before, after))
+	if delay > 0 {
 		r.queue.AddAfter(ctx, key, delay)
 
 		return

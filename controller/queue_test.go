@@ -23,6 +23,69 @@ type queueOp struct {
 	check func(test.Test, controller.Queue[string], error)
 }
 
+type resultOp struct {
+	item     string
+	shutdown bool
+}
+
+func setupQueueOps(recorder *MockRecorder, ops []queueOp) {
+	for _, op := range ops {
+		switch op.op {
+		case "add", "addafter":
+			recorder.EXPECT().AddEvent(
+				gomock.Any(), "test-queue", false).Times(1)
+		case "requeue":
+			recorder.EXPECT().AddEvent(
+				gomock.Any(), "test-queue", true).Times(1)
+		case "get":
+			if op.item != "" {
+				recorder.EXPECT().GetEvent(
+					gomock.Any(), "test-queue", gomock.Any()).Times(1)
+			}
+		}
+	}
+}
+
+func runQueueOps(
+	t test.Test, queue controller.Queue[string],
+	ops []queueOp, check func(test.Test, queueOp, resultOp),
+) {
+	ctx := context.Background()
+
+	for _, op := range ops {
+		var result resultOp
+
+		switch op.op {
+		case "add":
+			queue.Add(ctx, op.item)
+		case "addafter":
+			queue.AddAfter(ctx, op.item, op.delay)
+		case "get":
+			result.item, result.shutdown = queue.Get(ctx)
+			if op.check != nil {
+				op.check(t, queue, nil)
+			}
+		case "done":
+			queue.Done(ctx, op.item)
+		case "requeue":
+			err := queue.Requeue(ctx, op.item)
+			if op.check != nil {
+				op.check(t, queue, err)
+			}
+		case "forget":
+			queue.Forget(ctx, op.item)
+		case "shutdown":
+			queue.ShutDown(ctx)
+		case "len":
+			if op.check != nil {
+				op.check(t, queue, nil)
+			}
+		}
+
+		check(t, op, result)
+	}
+}
+
 type newDefaultQueueParams struct {
 	name     string
 	retries  int
@@ -295,8 +358,6 @@ var retryQueueTestCases = map[string]retryQueueParams{
 	},
 }
 
-//nolint:gocognit // TODO: improve test design.
-//revive:disable-next-line:cognitive-complexity // TODO: improve test design.
 func TestRetryQueue(t *testing.T) {
 	test.Map(t, retryQueueTestCases).
 		Run(func(t test.Test, param retryQueueParams) {
@@ -304,41 +365,15 @@ func TestRetryQueue(t *testing.T) {
 			queue := controller.NewRetryQueue("test-queue",
 				workqueue.NewTypedRateLimitingQueue(
 					workqueue.DefaultTypedControllerRateLimiter[string]()), 3)
-			ctx := context.Background()
 
 			// When/Then
-			for _, op := range param.ops {
-				switch op.op {
-				case "add":
-					queue.Add(ctx, op.item)
-				case "addafter":
-					queue.AddAfter(ctx, op.item, op.delay)
-				case "get":
-					item, shutdown := queue.Get(ctx)
-					if op.check != nil {
-						op.check(t, queue, nil)
+			runQueueOps(t, queue, param.ops,
+				func(t test.Test, op queueOp, result resultOp) {
+					if op.op == "get" && op.item != "" {
+						assert.Equal(t, op.item, result.item)
+						assert.False(t, result.shutdown)
 					}
-					if op.item != "" {
-						assert.Equal(t, op.item, item)
-						assert.False(t, shutdown)
-					}
-				case "done":
-					queue.Done(ctx, op.item)
-				case "requeue":
-					err := queue.Requeue(ctx, op.item)
-					if op.check != nil {
-						op.check(t, queue, err)
-					}
-				case "forget":
-					queue.Forget(ctx, op.item)
-				case "shutdown":
-					queue.ShutDown(ctx)
-				case "len":
-					if op.check != nil {
-						op.check(t, queue, nil)
-					}
-				}
-			}
+				})
 		})
 }
 
@@ -424,52 +459,21 @@ func TestMonitorQueue(t *testing.T) {
 				Times(1)
 
 			// Expect recorder calls
-			for _, op := range param.ops {
-				switch op.op {
-				case "add":
-					recorder.EXPECT().AddEvent(
-						gomock.Any(), "test-queue", false).Times(1)
-				case "addafter":
-					recorder.EXPECT().AddEvent(
-						gomock.Any(), "test-queue", false).Times(1)
-				case "requeue":
-					recorder.EXPECT().AddEvent(
-						gomock.Any(), "test-queue", true).Times(1)
-				case "get":
-					if op.item != "" {
-						recorder.EXPECT().GetEvent(
-							gomock.Any(), "test-queue", gomock.Any()).Times(1)
-					}
-				}
-			}
+			setupQueueOps(recorder, param.ops)
 
 			queue := controller.NewMonitorQueue(baseQueue, recorder)
-			ctx := context.Background()
 
 			// When/Then
-			for _, op := range param.ops {
-				switch op.op {
-				case "add":
-					queue.Add(ctx, op.item)
-				case "addafter":
-					queue.AddAfter(ctx, op.item, op.delay)
-				case "get":
-					item, shutdown := queue.Get(ctx)
-					if op.item != "" {
-						assert.Equal(t, op.item, item)
-						assert.False(t, shutdown)
-					} else {
-						assert.True(t, shutdown)
+			runQueueOps(t, queue, param.ops,
+				func(t test.Test, op queueOp, result resultOp) {
+					if op.op == "get" {
+						if op.item != "" {
+							assert.Equal(t, op.item, result.item)
+							assert.False(t, result.shutdown)
+						} else {
+							assert.True(t, result.shutdown)
+						}
 					}
-				case "done":
-					queue.Done(ctx, op.item)
-				case "requeue":
-					_ = queue.Requeue(ctx, op.item)
-				case "forget":
-					queue.Forget(ctx, op.item)
-				case "shutdown":
-					queue.ShutDown(ctx)
-				}
-			}
+				})
 		})
 }
