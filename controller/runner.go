@@ -81,12 +81,10 @@ func runner(
 	return func(ctx context.Context) {
 		wg := sync.WaitGroup{}
 
-		wg.Add(len(runnables))
 		for _, runnable := range runnables {
-			go func(runnable Runnable) {
+			wg.Go(func() {
 				runnable.Init(ctx, errch)
-				wg.Done()
-			}(runnable)
+			})
 		}
 		wg.Wait()
 
